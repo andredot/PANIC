@@ -8,7 +8,7 @@ Run each section (between #%% markers) separately using Ctrl+Enter in Spyder.
 The #%% markers create "cells" like in Jupyter notebooks, so you can run
 the code step by step and see the output before moving on.
 
-Author: Andrea Pedot
+Author: Generated for VDI environment
 Date: April 2026
 """
 

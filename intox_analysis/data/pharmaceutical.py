@@ -267,6 +267,7 @@ PHARMA_COLUMN_MAPPING = {
     "Desc Atc": "drug_name",
     "Cod Tipo Medico": "prescriber_type_code",
     "Desc Tipo Medico": "prescriber_type_desc",
+    "DDD": "ddd",  # Defined Daily Dose - NEW in updated extract
 }
 
 # Prescriber types (from VDI observations)
