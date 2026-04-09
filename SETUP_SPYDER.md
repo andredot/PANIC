@@ -1,81 +1,130 @@
-# Setting Up the Project in Spyder
+# Setting Up PANIC in Spyder
 
-## Step 1: Open the Project Folder
+## Step 1: Open the Project
 
-In Spyder, go to **Projects → New Project → Existing directory** and select this folder (`intox_lombardy_spyder`).
+In Spyder, go to **Projects → New Project → Existing directory** and select this folder.
 
-Alternatively, you can simply open files directly from **File → Open** and navigate to this folder.
+Or simply open files via **File → Open**.
 
-## Step 2: Set the Working Directory
+## Step 2: Set Working Directory
 
-This is important! Spyder needs to know where your project root is.
+**Important!** Spyder needs to know where your project root is.
 
-Go to the **Files** pane (usually on the right side), navigate to this folder, right-click and select **"Set as current working directory"**.
+Option A: In the **Files** pane, navigate to this folder, right-click → **"Set as current working directory"**
 
-Or in the IPython console at the bottom, type:
+Option B: In the IPython console:
 ```python
 import os
-os.chdir(r"C:\path\to\intox_lombardy_spyder")  # Replace with your actual path
+os.chdir(r"C:\Users\andre\OneDrive\Documenti\PANIC")  # Your actual path
 ```
 
-## Step 3: Install Required Packages
+## Step 3: Run Setup
 
-Open the **Anaconda Prompt** (or terminal) and run:
+Open and run `setup_environment.py` (F5). This will:
+1. Install all required packages
+2. Verify the installation
+3. Set up Python paths
 
-```bash
-pip install polars pandas numpy statsmodels scipy matplotlib seaborn
+## Step 4: Verify Everything Works
+
+Run `notebooks/00_verify_setup.py` to check that all imports work correctly.
+
+## Step 5: Run the Analysis Pipeline
+
+```
+00_generate_synthetic_data.py  → Creates test data
+03_intoxication_trends.py      → Drug class trends (Q1, Q4)
+04_stratified_analysis.py      → Demographics (Q3)
+05_prescription_linkage.py     → Pharma linkage (Q5)
+06_generate_report.py          → HTML report
 ```
 
-If you're using Anaconda, you might prefer:
-```bash
-conda install polars pandas numpy statsmodels scipy matplotlib seaborn -c conda-forge
-```
+## Dependencies
 
-## Step 4: Verify Setup
+### Required
+| Package | Purpose |
+|---------|---------|
+| `pandas` | DataFrame operations |
+| `numpy` | Numerical computing |
+| `matplotlib` | Visualisations |
+| `polars` | Fast large file processing |
+| `scipy` | Statistical tests |
+| `pandera` | DataFrame validation |
+| `pydantic` | Data validation |
+| `pytest` | Testing |
 
-Open `notebooks/00_verify_setup.py` in Spyder and run it (F5 or the green play button). It will check that everything is working.
+### Optional
+| Package | Purpose |
+|---------|---------|
+| `seaborn` | Enhanced plots |
+| `statsmodels` | Segmented regression |
 
 ## Folder Structure
 
 ```
-intox_lombardy_spyder/
+PANIC/
+├── setup_environment.py      # Run FIRST
+├── config.py                 # Paths and parameters
 │
-├── SETUP_SPYDER.md          # This file
-├── config.py                # Project configuration (paths, constants)
+├── intox_analysis/           # Analysis package
+│   ├── data/
+│   │   ├── schemas.py        # ICD classification
+│   │   ├── pharmaceutical.py # ATC codes, Polars
+│   │   ├── residence.py      # Urban/rural
+│   │   └── generators.py     # Synthetic data
+│   └── analysis/
+│       └── trends.py         # Trend functions
 │
-├── intox_analysis/          # Main analysis code
-│   ├── __init__.py
-│   └── data/
-│       ├── __init__.py
-│       ├── schemas.py       # ED data schemas & ICD classification
-│       └── pharmaceutical.py # Pharma data processing (Polars)
-│
-├── notebooks/               # Analysis scripts (run these!)
-│   ├── 00_verify_setup.py   # Check your installation
-│   ├── 01_load_ed_data.py   # Load and explore ED data
-│   └── 02_load_pharma_data.py # Load pharmaceutical data
+├── notebooks/                # Run these scripts
+│   ├── 00_generate_synthetic_data.py
+│   ├── 00_verify_setup.py
+│   ├── 03_intoxication_trends.py
+│   ├── 04_stratified_analysis.py
+│   ├── 05_prescription_linkage.py
+│   └── 06_generate_report.py
 │
 ├── data/
-│   ├── raw/                 # Put your CSV exports here
-│   └── processed/           # Intermediate files
+│   ├── raw/                  # Your VDI exports (gitignored)
+│   ├── lookups/              # ISTAT FUA (public)
+│   └── processed/            # Intermediate files
 │
 └── outputs/
-    ├── figures/             # Generated plots
-    └── tables/              # Generated tables
+    ├── figures/              # PNG charts
+    ├── tables/               # CSV tables
+    └── report_*.html         # Reports
 ```
 
-## Step 5: Place Your Data
+## Troubleshooting
 
-Copy your data extracts into the `data/raw/` folder:
-- ED presentation CSVs
-- Pharmaceutical CSVs (one per year is fine)
+### "No module named 'intox_analysis'"
 
-Then update the paths in `config.py` to match your filenames.
+Make sure your working directory is set correctly:
+```python
+import os
+print(os.getcwd())  # Should show your PANIC folder
+```
 
-## Getting Help
+If not, set it:
+```python
+os.chdir(r"C:\path\to\PANIC")
+```
 
-If you get import errors like "No module named 'intox_analysis'", make sure:
-1. Your working directory is set to this folder
-2. You've run: `import sys; sys.path.insert(0, '.')` 
+### Import still fails after setting directory
 
-This is handled automatically in the notebook scripts.
+Add the project to Python path:
+```python
+import sys
+sys.path.insert(0, r"C:\path\to\PANIC")
+```
+
+Or use PYTHONPATH manager: **Tools → PYTHONPATH manager → Add path**
+
+### Polars won't install
+
+Try:
+```python
+import subprocess, sys
+subprocess.check_call([sys.executable, "-m", "pip", "install", "polars", "--user"])
+```
+
+Then restart the kernel: **Consoles → Restart kernel**

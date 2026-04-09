@@ -2,7 +2,7 @@
 Project Configuration
 =====================
 
-Central configuration for the Lombardy Drug Intoxication Analysis project.
+Central configuration for the PANIC (Drug Intoxication Analysis) project.
 Update the paths below to match your VDI environment.
 
 Usage:
@@ -12,34 +12,35 @@ Usage:
 from pathlib import Path
 
 # =============================================================================
-# DIRECTORY PATHS - UPDATE THESE FOR YOUR VDI ENVIRONMENT
+# DIRECTORY PATHS
 # =============================================================================
 
 # Project root (this folder)
 PROJECT_DIR = Path(__file__).parent
 
-# Where your raw data extracts are stored
+# Data directories
 DATA_DIR = PROJECT_DIR / "data" / "raw"
-
-# Where processed/intermediate files go
+LOOKUPS_DIR = PROJECT_DIR / "data" / "lookups"
 PROCESSED_DIR = PROJECT_DIR / "data" / "processed"
 
-# Where outputs (figures, tables) are saved
+# Output directories
 OUTPUT_DIR = PROJECT_DIR / "outputs"
 FIGURES_DIR = OUTPUT_DIR / "figures"
 TABLES_DIR = OUTPUT_DIR / "tables"
 
 
 # =============================================================================
-# DATA FILE PATHS - UPDATE THESE TO MATCH YOUR FILENAMES
+# DATA FILE PATHS
 # =============================================================================
 
 # ED presentation data
-# (update with your actual filename from the VDI extract)
 ED_DATA_FILE = DATA_DIR / "ed_presentations.csv"
 
-# Pharmaceutical data (one file per year)
-# Update these paths to match your actual files
+# Pharmaceutical data
+# Option 1: Single synthetic file (from generator)
+PHARMA_SYNTHETIC_FILE = DATA_DIR / "pharma_synthetic.csv"
+
+# Option 2: One file per year (from VDI)
 PHARMA_FILES = [
     DATA_DIR / "pharma_2017.csv",
     DATA_DIR / "pharma_2018.csv",
@@ -54,6 +55,9 @@ PHARMA_FILES = [
 
 # Only include files that exist
 PHARMA_FILES_EXISTING = [f for f in PHARMA_FILES if f.exists()]
+
+# FUA lookup for urban/rural classification (ISTAT public data)
+FUA_LOOKUP_FILE = LOOKUPS_DIR / "istat_fua_comuni.csv"
 
 
 # =============================================================================
@@ -109,6 +113,9 @@ ED_COLUMN_MAPPING = {
     "Descrizione Esito": "disposition_desc",
     "Codice Nazione(flusso)": "nationality_code",
     "Conteggio Persone fisiche": "count",
+    # New fields (added in updated extract)
+    "facility_id": "facility_id",
+    "residence": "residence",
 }
 
 # Pharmaceutical data column mapping
@@ -122,8 +129,7 @@ PHARMA_COLUMN_MAPPING = {
     "Desc Atc": "drug_name",
     "Cod Tipo Medico": "prescriber_type_code",
     "Desc Tipo Medico": "prescriber_type_desc",
-    # Add DDD column when available
-    # "DDD": "ddd",
+    "DDD": "ddd",
 }
 
 
@@ -134,32 +140,49 @@ PHARMA_COLUMN_MAPPING = {
 def check_setup():
     """Print setup status for debugging."""
     print("=" * 60)
-    print("PROJECT CONFIGURATION STATUS")
+    print("PANIC - CONFIGURATION STATUS")
     print("=" * 60)
-    print(f"Project directory: {PROJECT_DIR}")
-    print(f"  Exists: {PROJECT_DIR.exists()}")
-    print()
-    print(f"Data directory: {DATA_DIR}")
-    print(f"  Exists: {DATA_DIR.exists()}")
+    
+    print(f"\nProject: {PROJECT_DIR}")
+    print(f"  Exists: {'✓' if PROJECT_DIR.exists() else '✗'}")
+    
+    print(f"\nData directory: {DATA_DIR}")
     if DATA_DIR.exists():
-        files = list(DATA_DIR.glob("*"))
-        print(f"  Files found: {len(files)}")
+        files = list(DATA_DIR.glob("*.csv"))
+        print(f"  CSV files: {len(files)}")
         for f in files[:5]:
-            print(f"    - {f.name}")
+            size_mb = f.stat().st_size / (1024 * 1024)
+            print(f"    • {f.name} ({size_mb:.1f} MB)")
         if len(files) > 5:
             print(f"    ... and {len(files) - 5} more")
-    print()
-    print(f"ED data file: {ED_DATA_FILE}")
-    print(f"  Exists: {ED_DATA_FILE.exists()}")
-    print()
-    print(f"Pharmaceutical files configured: {len(PHARMA_FILES)}")
-    print(f"Pharmaceutical files existing: {len(PHARMA_FILES_EXISTING)}")
-    for f in PHARMA_FILES_EXISTING:
-        print(f"  ✓ {f.name}")
-    print()
-    print(f"Output directory: {OUTPUT_DIR}")
-    print(f"  Exists: {OUTPUT_DIR.exists()}")
-    print("=" * 60)
+    else:
+        print("  (not created yet)")
+    
+    print(f"\nLookups directory: {LOOKUPS_DIR}")
+    if LOOKUPS_DIR.exists():
+        files = list(LOOKUPS_DIR.glob("*.csv"))
+        print(f"  CSV files: {len(files)}")
+        for f in files:
+            print(f"    • {f.name}")
+    else:
+        print("  (not created yet)")
+    
+    print(f"\nKey files:")
+    print(f"  ED data:        {'✓' if ED_DATA_FILE.exists() else '✗'} {ED_DATA_FILE.name}")
+    print(f"  Pharma synth:   {'✓' if PHARMA_SYNTHETIC_FILE.exists() else '✗'} {PHARMA_SYNTHETIC_FILE.name}")
+    print(f"  FUA lookup:     {'✓' if FUA_LOOKUP_FILE.exists() else '✗'} {FUA_LOOKUP_FILE.name}")
+    print(f"  Pharma (VDI):   {len(PHARMA_FILES_EXISTING)} of {len(PHARMA_FILES)} files")
+    
+    print(f"\nOutput directory: {OUTPUT_DIR}")
+    print(f"  Exists: {'✓' if OUTPUT_DIR.exists() else '✗'}")
+    if FIGURES_DIR.exists():
+        figs = list(FIGURES_DIR.glob("*.png"))
+        print(f"  Figures: {len(figs)}")
+    if TABLES_DIR.exists():
+        tabs = list(TABLES_DIR.glob("*.csv"))
+        print(f"  Tables: {len(tabs)}")
+    
+    print("\n" + "=" * 60)
 
 
 if __name__ == "__main__":
