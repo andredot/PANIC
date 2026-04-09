@@ -22,9 +22,8 @@ from pathlib import Path
 
 # Add project source to Python path
 project_root = Path(__file__).parent.parent.resolve()
-src_path = project_root / "src"
-if str(src_path) not in sys.path:
-    sys.path.insert(0, str(src_path))
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 # Core libraries
 import polars as pl
