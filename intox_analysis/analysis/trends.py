@@ -631,7 +631,7 @@ def compute_trend_metrics(
 
 def create_trend_summary_table(
     metrics: List[TrendMetrics],
-    sort_by: str = "avg_yoy_growth",
+    sort_by: str = "Avg YoY Growth (%)",
 ) -> pd.DataFrame:
     """
     Create a summary table of trend metrics.
@@ -659,7 +659,8 @@ def create_trend_summary_table(
         })
     
     df = pd.DataFrame(data)
-    df = df.sort_values(sort_by, ascending=False)
+    if len(df) > 0 and sort_by in df.columns:
+        df = df.sort_values(sort_by, ascending=False)
     
     return df
 

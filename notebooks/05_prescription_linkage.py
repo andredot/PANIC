@@ -235,7 +235,7 @@ def link_intoxications_to_prescriptions(
     # For each intoxication case, check for prior prescriptions
     results = []
     
-    for _, row in ed_df.iterrows():
+    for idx, row in ed_df.iterrows():
         patient = row[patient_id_col]
         ed_date = row[ed_date_col]
         
@@ -250,7 +250,7 @@ def link_intoxications_to_prescriptions(
         n_rx = len(patient_rx)
         
         # Check drug classes
-        if had_rx:
+        if had_rx and "drug_class" in patient_rx.columns:
             drug_classes = patient_rx["drug_class"].unique().tolist()
             had_benzo_rx = "benzodiazepine" in drug_classes or "z_drug" in drug_classes
             had_opioid_rx = "opioid" in drug_classes
@@ -262,8 +262,7 @@ def link_intoxications_to_prescriptions(
             total_ddd = 0
         
         results.append({
-            patient_id_col: patient,
-            "ed_date": ed_date,
+            "idx": idx,
             "had_prior_rx": had_rx,
             "n_prior_rx": n_rx,
             "rx_drug_classes": drug_classes,
@@ -272,10 +271,10 @@ def link_intoxications_to_prescriptions(
             "prior_ddd": total_ddd,
         })
     
-    linkage_df = pd.DataFrame(results)
+    linkage_df = pd.DataFrame(results).set_index("idx")
     
-    # Merge back to original ED data
-    ed_enriched = ed_df.merge(linkage_df, on=[patient_id_col, "ed_date"], how="left")
+    # Join results back to original ED data using index
+    ed_enriched = ed_df.join(linkage_df)
     
     return ed_enriched
 
@@ -552,7 +551,27 @@ else:
     print("\n--- Loading Real Data ---")
     
     ed_df = pd.read_csv(ED_FILE)
-    # Process as needed...
+    
+    # Rename columns to standard names
+    ed_column_mapping = {
+        "Codice Fiscale Assistito MICROBIO": "patient_id",
+        "Annomese_INGR": "year_month",
+        "Eta(calcolata)": "age_years",
+        "Sesso (anag ass.to)": "sex",
+        "Cod Diagnosi": "diagnosis_code_primary",
+        "Codice Esito": "disposition_code",
+    }
+    ed_df = ed_df.rename(columns={k: v for k, v in ed_column_mapping.items() if k in ed_df.columns})
+    
+    # Create presentation_date from year_month (YYYYMM -> YYYY-MM-15)
+    if "year_month" in ed_df.columns and "presentation_date" not in ed_df.columns:
+        ed_df["year_month"] = ed_df["year_month"].astype(str)
+        ed_df["presentation_date"] = pd.to_datetime(
+            ed_df["year_month"].str[:4] + "-" + ed_df["year_month"].str[4:6] + "-15"
+        )
+    ed_df["year"] = ed_df["presentation_date"].dt.year
+    
+    print(f"  Loaded {len(ed_df):,} ED records")
     
     # Load pharma data
     if HAS_POLARS:
@@ -565,6 +584,43 @@ else:
         pharma_df = lf.collect().to_pandas()
     else:
         pharma_df = pd.concat([pd.read_csv(f) for f in PHARMA_FILES])
+    
+    # Rename pharma columns
+    pharma_column_mapping = {
+        "Codice Fiscale Assistito MICROBIO": "patient_id",
+        "Data Erogazione.Data": "dispensing_date",
+        "Cod Atc": "atc_code",
+        "DDD": "ddd",
+    }
+    pharma_df = pharma_df.rename(columns={k: v for k, v in pharma_column_mapping.items() if k in pharma_df.columns})
+    
+    # Parse dispensing date
+    if "dispensing_date" in pharma_df.columns:
+        pharma_df["dispensing_date"] = pd.to_datetime(pharma_df["dispensing_date"], errors="coerce")
+    
+    # Add drug_class from ATC code
+    if "atc_code" in pharma_df.columns and "drug_class" not in pharma_df.columns:
+        def classify_atc(code):
+            if pd.isna(code):
+                return "other"
+            code = str(code).upper()
+            if code.startswith("N05BA") or code.startswith("N05CD"):
+                return "benzodiazepine"
+            elif code.startswith("N05CF"):
+                return "z_drug"
+            elif code.startswith("N02A"):
+                return "opioid"
+            elif code.startswith("N06A"):
+                return "antidepressant"
+            elif code.startswith("N06BA"):
+                return "stimulant"
+            else:
+                return "other"
+        pharma_df["drug_class"] = pharma_df["atc_code"].apply(classify_atc)
+    
+    pharma_df["year"] = pharma_df["dispensing_date"].dt.year
+    
+    print(f"  Loaded {len(pharma_df):,} pharma records")
 
 # -----------------------------------------------------------------------------
 # STEP 1: DDD TRENDS
@@ -619,30 +675,62 @@ print("\n" + "=" * 70)
 print("STEP 3: INTOXICATION-PRESCRIPTION LINKAGE")
 print("=" * 70)
 
-linkage_df = link_intoxications_to_prescriptions(
-    ed_df,
-    pharma_df,
-    ed_date_col="presentation_date",
-    pharma_date_col="dispensing_date",
-    lookback_days=LOOKBACK_DAYS,
-)
+# Filter to intoxication cases only (not all 50k ED presentations)
+# Check if we have diagnosis info to filter
+if "diagnosis_code_primary" in ed_df.columns:
+    intox_mask = ed_df["diagnosis_code_primary"].astype(str).str.startswith(("T4", "96"))
+    ed_intox = ed_df[intox_mask].copy()
+    print(f"Filtered to {len(ed_intox):,} intoxication cases (from {len(ed_df):,} total ED)")
+else:
+    # If no diagnosis column, assume all are intoxications (synthetic data case)
+    ed_intox = ed_df.copy()
+    print(f"Processing {len(ed_intox):,} records")
 
-# Summary statistics
-n_with_rx = linkage_df["had_prior_rx"].sum()
-n_total = len(linkage_df)
-pct_with_rx = n_with_rx / n_total * 100
+# Skip linkage if too many records (would be slow) or no pharma data
+if len(ed_intox) > 10000:
+    print(f"\n⚠ Too many records ({len(ed_intox):,}) for row-by-row linkage.")
+    print("  Performing simplified aggregate analysis instead...")
+    
+    # Simplified linkage: just check if patient IDs overlap
+    ed_patients = set(ed_intox["patient_id"].unique())
+    pharma_patients = set(pharma_df["patient_id"].unique())
+    overlap_patients = ed_patients & pharma_patients
+    
+    n_with_rx = len(overlap_patients)
+    n_total = len(ed_patients)
+    pct_with_rx = 100 * n_with_rx / n_total if n_total > 0 else 0
+    
+    print(f"\nIntoxication patients with ANY prescription history:")
+    print(f"  With prior Rx: {n_with_rx:,} ({pct_with_rx:.1f}%)")
+    print(f"  Without prior Rx: {n_total - n_with_rx:,} ({100-pct_with_rx:.1f}%)")
+    
+    linkage_df = None
+    
+else:
+    linkage_df = link_intoxications_to_prescriptions(
+        ed_intox,
+        pharma_df,
+        ed_date_col="presentation_date",
+        pharma_date_col="dispensing_date",
+        lookback_days=LOOKBACK_DAYS,
+    )
+    
+    # Summary statistics
+    n_with_rx = linkage_df["had_prior_rx"].sum()
+    n_total = len(linkage_df)
+    pct_with_rx = n_with_rx / n_total * 100
 
-print(f"\nIntoxication cases with prior prescription ({LOOKBACK_DAYS}-day lookback):")
-print(f"  With prior Rx: {n_with_rx:,} ({pct_with_rx:.1f}%)")
-print(f"  Without prior Rx: {n_total - n_with_rx:,} ({100-pct_with_rx:.1f}%)")
+    print(f"\nIntoxication cases with prior prescription ({LOOKBACK_DAYS}-day lookback):")
+    print(f"  With prior Rx: {n_with_rx:,} ({pct_with_rx:.1f}%)")
+    print(f"  Without prior Rx: {n_total - n_with_rx:,} ({100-pct_with_rx:.1f}%)")
 
-# Among those with prior Rx
-if n_with_rx > 0:
-    with_rx = linkage_df[linkage_df["had_prior_rx"]]
-    print(f"\nAmong those with prior prescriptions:")
-    print(f"  Had benzo/Z-drug Rx: {with_rx['had_benzo_rx'].sum():,} ({100*with_rx['had_benzo_rx'].mean():.1f}%)")
-    print(f"  Had opioid Rx: {with_rx['had_opioid_rx'].sum():,} ({100*with_rx['had_opioid_rx'].mean():.1f}%)")
-    print(f"  Mean prior prescriptions: {with_rx['n_prior_rx'].mean():.1f}")
+    # Among those with prior Rx
+    if n_with_rx > 0:
+        with_rx = linkage_df[linkage_df["had_prior_rx"]]
+        print(f"\nAmong those with prior prescriptions:")
+        print(f"  Had benzo/Z-drug Rx: {with_rx['had_benzo_rx'].sum():,} ({100*with_rx['had_benzo_rx'].mean():.1f}%)")
+        print(f"  Had opioid Rx: {with_rx['had_opioid_rx'].sum():,} ({100*with_rx['had_opioid_rx'].mean():.1f}%)")
+        print(f"  Mean prior prescriptions: {with_rx['n_prior_rx'].mean():.1f}")
 
 # -----------------------------------------------------------------------------
 # STEP 4: GENERATE FIGURES
@@ -661,10 +749,13 @@ if annual_ddd is not None:
     fig1.savefig(figures_dir / "prescribing_ddd_trends.png", dpi=150, bbox_inches="tight")
     print("✓ Saved: prescribing_ddd_trends.png")
 
-# Figure 2: User type breakdown
-fig2 = plot_user_type_breakdown(linkage_df)
-fig2.savefig(figures_dir / "intox_prescription_linkage.png", dpi=150, bbox_inches="tight")
-print("✓ Saved: intox_prescription_linkage.png")
+# Figure 2: User type breakdown (only if detailed linkage was performed)
+if linkage_df is not None:
+    fig2 = plot_user_type_breakdown(linkage_df)
+    fig2.savefig(figures_dir / "intox_prescription_linkage.png", dpi=150, bbox_inches="tight")
+    print("✓ Saved: intox_prescription_linkage.png")
+else:
+    print("⚠ Skipped linkage figure (simplified analysis mode)")
 
 # -----------------------------------------------------------------------------
 # STEP 5: SAVE RESULTS
@@ -680,24 +771,41 @@ if annual_ddd is not None:
 
 user_summary.to_csv(tables_dir / "user_type_by_drug_class.csv")
 
-linkage_summary = pd.DataFrame({
-    "Metric": [
-        "Total intoxication cases",
-        "With prior prescription",
-        "Without prior prescription",
-        "% with prior Rx",
-        "With benzo/Z-drug Rx",
-        "With opioid Rx",
-    ],
-    "Value": [
-        n_total,
-        n_with_rx,
-        n_total - n_with_rx,
-        f"{pct_with_rx:.1f}%",
-        linkage_df["had_benzo_rx"].sum() if "had_benzo_rx" in linkage_df else "N/A",
-        linkage_df["had_opioid_rx"].sum() if "had_opioid_rx" in linkage_df else "N/A",
-    ]
-})
+# Create linkage summary
+if linkage_df is not None:
+    linkage_summary = pd.DataFrame({
+        "Metric": [
+            "Total intoxication cases",
+            "With prior prescription",
+            "Without prior prescription",
+            "% with prior Rx",
+            "With benzo/Z-drug Rx",
+            "With opioid Rx",
+        ],
+        "Value": [
+            n_total,
+            n_with_rx,
+            n_total - n_with_rx,
+            f"{pct_with_rx:.1f}%",
+            linkage_df["had_benzo_rx"].sum() if "had_benzo_rx" in linkage_df.columns else "N/A",
+            linkage_df["had_opioid_rx"].sum() if "had_opioid_rx" in linkage_df.columns else "N/A",
+        ]
+    })
+else:
+    linkage_summary = pd.DataFrame({
+        "Metric": [
+            "Total intoxication patients",
+            "With ANY prescription history",
+            "Without prescription history",
+            "% with prior Rx",
+        ],
+        "Value": [
+            n_total,
+            n_with_rx,
+            n_total - n_with_rx,
+            f"{pct_with_rx:.1f}%",
+        ]
+    })
 linkage_summary.to_csv(tables_dir / "prescription_linkage_summary.csv", index=False)
 
 print("✓ Tables saved to:", tables_dir)
