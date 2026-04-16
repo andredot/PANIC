@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-03_intoxication_trends.py
+05_intoxication_trends.py
 =========================
 
-This script analyses drug intoxication trends by drug class to identify
+Analyse drug intoxication trends by drug class to identify
 which drugs are driving the upward trend in ED presentations.
 
 Outputs:
@@ -12,8 +12,9 @@ Outputs:
 3. Line chart: Annual trends for top drug classes
 4. Comparison: All ED presentations vs admitted patients only
 
-The same analysis is then repeated for mental health diagnoses to explore
-whether mental health trends might explain prescribing (and thus intoxication) increases.
+The same analysis is then repeated for mental health diagnoses.
+
+All configuration comes from config.py
 """
 
 import sys
@@ -25,6 +26,13 @@ sys.path.insert(0, str(project_root))
 
 import pandas as pd
 import numpy as np
+
+# Import configuration
+from config import (
+    DATA_DIR, OUTPUT_DIR, FIGURES_DIR, TABLES_DIR,
+    ED_DATA_FILE, PROCESSED_DIR,
+    ED_COLUMN_MAPPING,
+)
 
 # Import our analysis module
 from intox_analysis.analysis.trends import (
@@ -39,22 +47,15 @@ from intox_analysis.analysis.trends import (
 # CONFIGURATION
 # =============================================================================
 
-DATA_DIR = project_root / "data" / "raw"
-OUTPUT_DIR = project_root / "outputs"
-
-# Update this to your actual ED data file!
-ED_FILE = DATA_DIR / "ed_presentations.csv"
-
 # Column names (update if your export uses different names)
-# These should match after loading - check your CSV headers
 COL_CONFIG = {
-    "diagnosis_col_primary": "diagnosis_code_primary",     # or "Cod Diagnosi"
-    "diagnosis_col_secondary": "diagnosis_code_secondary", # or "Cod Diagnosi Secondaria"  
-    "date_col": "year_month",                              # or "Annomese_INGR"
-    "esito_col": "disposition_code",                       # or "Codice Esito"
+    "diagnosis_col_primary": "diagnosis_code_primary",
+    "diagnosis_col_secondary": "diagnosis_code_secondary",
+    "date_col": "year_month",
+    "esito_col": "disposition_code",
 }
 
-# Esito codes that indicate hospital admission (verify against your codebook!)
+# Esito codes that indicate hospital admission
 ADMISSION_CODES = ["2", "3", "4"]
 
 # Number of recent years for trend analysis
@@ -68,88 +69,37 @@ print("=" * 70)
 print("DRUG INTOXICATION & MENTAL HEALTH TREND ANALYSIS")
 print("=" * 70)
 
-if not ED_FILE.exists():
-    print(f"\n⚠ Data file not found: {ED_FILE}")
-    print("\nCreating SYNTHETIC DATA for demonstration...")
-    print("(Replace with your actual data for real analysis)")
-    
-    # Generate synthetic data
-    np.random.seed(42)
-    n_records = 50000
-    
-    years = np.random.choice([2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025], 
-                              n_records, p=[0.08, 0.09, 0.10, 0.11, 0.12, 0.12, 0.13, 0.13, 0.12])
-    months = np.random.randint(1, 13, n_records)
-    
-    # Mix of drug intoxication and other diagnoses
-    # Higher proportion of benzos in recent years to simulate the trend
-    drug_codes_icd10 = ["T424X2A", "T424X1A", "T400X1A", "T391X1A", "T436X2A", "T510X1A", "T426X2A"]
-    drug_codes_icd9 = ["9694", "96509", "9650", "9697"]
-    mh_codes_icd10 = ["F329", "F411", "F500", "F431", "F320", "F412"]
-    mh_codes_icd9 = ["3004", "311", "30750", "309"]
-    other_codes = ["J189", "K529", "R104", "S0100", "R55"]  # Random non-relevant codes
-    
-    # Create diagnosis distribution that changes over time
-    diagnoses = []
-    for i, year in enumerate(years):
-        if year >= 2023:
-            # More benzos in recent years
-            weights = [0.20, 0.10, 0.05, 0.05, 0.03, 0.02, 0.02,  # ICD-10 drugs
-                       0.05, 0.03, 0.02, 0.02,  # ICD-9 drugs
-                       0.08, 0.05, 0.03, 0.03, 0.02, 0.02,  # Mental health
-                       0.05, 0.03, 0.02, 0.02, 0.06]  # Other
-        elif year >= 2020:
-            weights = [0.15, 0.08, 0.05, 0.05, 0.03, 0.02, 0.02,
-                       0.05, 0.03, 0.02, 0.02,
-                       0.10, 0.06, 0.04, 0.04, 0.03, 0.02,
-                       0.05, 0.04, 0.03, 0.03, 0.04]
-        else:
-            weights = [0.10, 0.06, 0.05, 0.04, 0.03, 0.02, 0.02,
-                       0.06, 0.04, 0.03, 0.02,
-                       0.08, 0.05, 0.03, 0.03, 0.02, 0.02,
-                       0.08, 0.06, 0.05, 0.05, 0.06]
-        
-        all_codes = drug_codes_icd10 + drug_codes_icd9 + mh_codes_icd10 + mh_codes_icd9 + other_codes
-        diagnoses.append(np.random.choice(all_codes, p=weights))
-    
-    df = pd.DataFrame({
-        "patient_id": [f"MB-{''.join(np.random.choice(list('0123456789ABCDEF'), 64))}" for _ in range(n_records)],
-        "year_month": [f"{y}{m:02d}" for y, m in zip(years, months)],
-        "age_years": np.random.normal(45, 18, n_records).astype(int).clip(10, 95),
-        "sex_registry": np.random.choice(["M", "F"], n_records, p=[0.45, 0.55]),
-        "diagnosis_code_primary": diagnoses,
-        "diagnosis_desc_primary": ["Synthetic diagnosis"] * n_records,
-        "diagnosis_code_secondary": np.random.choice(["_", "F329", "F411", ""], n_records, p=[0.6, 0.15, 0.15, 0.1]),
-        "diagnosis_desc_secondary": ["_"] * n_records,
-        "disposition_code": np.random.choice(["1", "2", "3", "4"], n_records, p=[0.75, 0.15, 0.07, 0.03]),
-        "disposition_desc": ["Synthetic"] * n_records,
-    })
-    
-    print(f"Generated {len(df):,} synthetic records")
-    USE_SYNTHETIC = True
+# Try processed file first, then raw file
+processed_file = PROCESSED_DIR / "ed_processed.csv"
 
-else:
-    print(f"\nLoading: {ED_FILE}")
-    df = pd.read_csv(ED_FILE)
+if processed_file.exists():
+    print(f"\nLoading processed data: {processed_file.name}")
+    df = pd.read_csv(processed_file)
+    print(f"Loaded {len(df):,} records")
+    USE_SYNTHETIC = False
+
+elif ED_DATA_FILE.exists():
+    print(f"\nLoading: {ED_DATA_FILE}")
+    df = pd.read_csv(ED_DATA_FILE)
     print(f"Loaded {len(df):,} records")
     USE_SYNTHETIC = False
     
-    # Check if column renaming is needed
-    if "Cod Diagnosi" in df.columns:
-        print("\nRenaming Italian columns to English...")
-        column_mapping = {
-            "Codice Fiscale Assistito MICROBIO": "patient_id",
-            "Annomese_INGR": "year_month",
-            "Eta(calcolata)": "age_years",
-            "Sesso (anag ass.to)": "sex_registry",
-            "Cod Diagnosi": "diagnosis_code_primary",
-            "Diagnosi": "diagnosis_desc_primary",
-            "Cod Diagnosi Secondaria": "diagnosis_code_secondary",
-            "Diagnosi Secondaria": "diagnosis_desc_secondary",
-            "Codice Esito": "disposition_code",
-            "Descrizione Esito": "disposition_desc",
-        }
-        df = df.rename(columns=column_mapping)
+    # Rename columns if needed
+    cols_to_rename = {k: v for k, v in ED_COLUMN_MAPPING.items() if k in df.columns}
+    if cols_to_rename:
+        print(f"Renaming {len(cols_to_rename)} columns...")
+        df = df.rename(columns=cols_to_rename)
+
+else:
+    print(f"\nData file not found: {ED_DATA_FILE}")
+    print("Generating SYNTHETIC DATA for testing...")
+    
+    from intox_analysis.data.generators import generate_ed_data
+    from config import STUDY_YEARS
+    
+    df = generate_ed_data(n_records=50000, years=STUDY_YEARS)
+    print(f"Generated {len(df):,} synthetic records")
+    USE_SYNTHETIC = True
 
 print(f"\nColumns: {list(df.columns)}")
 

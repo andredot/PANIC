@@ -1,6 +1,9 @@
-# Data Lookups
+# Data Lookups (OPTIONAL)
 
 This folder contains **public reference data** that CAN be committed to GitHub.
+
+**Note:** The FUA lookup may be unavailable due to privacy restrictions. 
+The analysis pipeline works without it - urban/rural classification will be skipped.
 
 ## Files
 
@@ -14,15 +17,15 @@ ISTAT FUA (Functional Urban Areas) classification for Italian municipalities.
 
 **Required columns:**
 - Municipality name (e.g., "Comune", "Municipality")
-- City classification (e.g., "Città (City/Greater City) 2021")
+- City classification (e.g., "City (City/Greater City) 2021")
 
 **Classification logic:**
-- **URBAN**: Municipality has a City/Greater City value (not "No City/Città")
-- **RURAL**: Municipality has "No City/Città" or is missing
+- **URBAN**: Municipality has a City/Greater City value (not "No City")
+- **RURAL**: Municipality has "No City" or is missing
 
 **How to obtain:**
 1. Go to https://situas.istat.it/web/#/home
-2. Navigate to "Unità territoriali" → "Unità statistiche" → "Zone urbane funzionali"
+2. Navigate to territorial units -> statistical units -> functional urban areas
 3. Download the composition of Cities 2021
 4. Save as `istat_fua_comuni.csv` in this folder
 

@@ -1,23 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-04_stratified_analysis.py
+06_stratified_analysis.py
 =========================
 
-This script performs stratified trend analysis to answer:
+Stratified trend analysis to answer:
 
 Q3: Who are the patients? How do trends vary by sex, age, and residence (urban/rural)?
-Q5: Is the trend linked to prescribing changes (chronic vs sporadic users)?
 
-NEW DATA FIELDS USED:
-- ED facility identifier (for heterogeneity analysis)
-- Residence (town/comune) → classified as urban/rural using ISTAT FUA lookup
-- DDD (Defined Daily Dose) in pharmaceutical data
+Analyses stratified by:
+- Sex (M/F)
+- Age group (0-17, 18-34, 35-54, 55-74, 75+)
+- Residence (urban/rural) - OPTIONAL, requires FUA lookup
+- ED facility
 
 OUTPUTS:
-- Stratified trend tables (by sex, age group, residence type)
-- Facility heterogeneity analysis
-- Prescription-intoxication linkage analysis
-- Forest plots and stratified line charts
+- Stratified trend tables (CSV)
+- Forest plots and stratified line charts (PNG)
+
+All configuration comes from config.py
 """
 
 import sys
@@ -31,6 +31,13 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
+# Import configuration
+from config import (
+    DATA_DIR, LOOKUPS_DIR, OUTPUT_DIR, FIGURES_DIR, TABLES_DIR,
+    PROCESSED_DIR, ED_DATA_FILE, FUA_LOOKUP_FILE,
+    AGE_GROUPS, AGE_GROUP_ORDER,
+)
+
 # Import our modules
 from intox_analysis.analysis.trends import (
     process_ed_data,
@@ -43,32 +50,16 @@ from intox_analysis.data.residence import (
     setup_urban_rural_classification,
     classify_residence,
     add_urban_rural_column,
+    is_fua_available,
 )
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-DATA_DIR = project_root / "data" / "raw"
-LOOKUP_DIR = project_root / "data" / "lookups"
-OUTPUT_DIR = project_root / "outputs"
-
-# File paths (UPDATE THESE)
-ED_FILE = DATA_DIR / "ed_presentations.csv"
-FUA_LOOKUP_FILE = LOOKUP_DIR / "istat_fua_comuni.csv"
-
 # Column names for new fields (UPDATE if different in your extract)
 RESIDENCE_COLUMN = "residence"      # Town/comune name
 FACILITY_COLUMN = "facility_id"     # ED facility identifier
-
-# Age group definitions
-AGE_GROUPS = {
-    "0-17": (0, 17),
-    "18-34": (18, 34),
-    "35-54": (35, 54),
-    "55-74": (55, 74),
-    "75+": (75, 150),
-}
 
 LAST_N_YEARS = 3  # For trend calculations
 
@@ -265,74 +256,31 @@ print("=" * 70)
 
 print("\n--- Step 1: Loading Data ---")
 
-if not ED_FILE.exists():
-    print(f"\n⚠ Data file not found: {ED_FILE}")
-    print("\nCreating SYNTHETIC DATA for demonstration...")
-    
-    # Generate synthetic data with new fields
-    np.random.seed(42)
-    n_records = 30000
-    
-    years = np.random.choice([2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025], 
-                              n_records, p=[0.08, 0.09, 0.10, 0.11, 0.12, 0.12, 0.13, 0.13, 0.12])
-    
-    # Drug codes with more benzos in recent years
-    def get_diagnosis(year):
-        if year >= 2023:
-            weights = [0.35, 0.15, 0.10, 0.08, 0.05, 0.27]  # More benzos
-        elif year >= 2020:
-            weights = [0.25, 0.15, 0.10, 0.08, 0.05, 0.37]
-        else:
-            weights = [0.15, 0.12, 0.10, 0.08, 0.05, 0.50]
-        codes = ["T424X2A", "T400X1A", "T391X1A", "T436X2A", "9694", "J189"]
-        return np.random.choice(codes, p=weights)
-    
-    diagnoses = [get_diagnosis(y) for y in years]
-    
-    # Residence (mix of urban and rural comuni in Lombardy)
-    urban_comuni = ["Milano", "Bergamo", "Brescia", "Monza", "Como", "Varese", "Pavia"]
-    rural_comuni = ["Sondrio", "Morbegno", "Chiavenna", "Bormio", "Livigno", "Tirano"]
-    all_comuni = urban_comuni + rural_comuni
-    residence_weights = [0.25, 0.12, 0.12, 0.08, 0.06, 0.05, 0.05] + [0.04, 0.03, 0.03, 0.03, 0.02, 0.02]
-    
-    # Facilities
-    facilities = ["OSP_MI_01", "OSP_MI_02", "OSP_BG_01", "OSP_BS_01", "OSP_CO_01"]
-    
-    df = pd.DataFrame({
-        "patient_id": [f"MB-{''.join(np.random.choice(list('0123456789ABCDEF'), 64))}" for _ in range(n_records)],
-        "year_month": [f"{y}{np.random.randint(1,13):02d}" for y in years],
-        "age_years": np.random.normal(42, 20, n_records).astype(int).clip(5, 95),
-        "sex_registry": np.random.choice(["M", "F"], n_records, p=[0.42, 0.58]),
-        "diagnosis_code_primary": diagnoses,
-        "diagnosis_code_secondary": ["_"] * n_records,
-        "disposition_code": np.random.choice(["1", "2", "3"], n_records, p=[0.78, 0.17, 0.05]),
-        "residence": np.random.choice(all_comuni, n_records, p=residence_weights),
-        "facility_id": np.random.choice(facilities, n_records, p=[0.35, 0.25, 0.20, 0.12, 0.08]),
-    })
-    
-    print(f"Generated {len(df):,} synthetic records")
-    USE_SYNTHETIC = True
+# Try processed file first
+processed_file = PROCESSED_DIR / "ed_processed.csv"
 
-else:
-    df = pd.read_csv(ED_FILE)
+if processed_file.exists():
+    print(f"\nLoading processed data: {processed_file.name}")
+    df = pd.read_csv(processed_file)
     print(f"Loaded {len(df):,} records")
     USE_SYNTHETIC = False
+
+elif ED_DATA_FILE.exists():
+    print(f"\nLoading: {ED_DATA_FILE}")
+    df = pd.read_csv(ED_DATA_FILE)
+    print(f"Loaded {len(df):,} records")
+    USE_SYNTHETIC = False
+
+else:
+    print(f"\nData file not found: {ED_DATA_FILE}")
+    print("Generating SYNTHETIC DATA for testing...")
     
-    # Rename columns if needed
-    if "Cod Diagnosi" in df.columns:
-        column_mapping = {
-            "Codice Fiscale Assistito MICROBIO": "patient_id",
-            "Annomese_INGR": "year_month",
-            "Eta(calcolata)": "age_years",
-            "Sesso (anag ass.to)": "sex_registry",
-            "Cod Diagnosi": "diagnosis_code_primary",
-            "Cod Diagnosi Secondaria": "diagnosis_code_secondary",
-            "Codice Esito": "disposition_code",
-            # Add your actual column names for new fields:
-            # "YOUR_RESIDENCE_COL": "residence",
-            # "YOUR_FACILITY_COL": "facility_id",
-        }
-        df = df.rename(columns=column_mapping)
+    from intox_analysis.data.generators import generate_ed_data
+    from config import STUDY_YEARS
+    
+    df = generate_ed_data(n_records=50000, years=STUDY_YEARS)
+    print(f"Generated {len(df):,} synthetic records")
+    USE_SYNTHETIC = True
 
 # -----------------------------------------------------------------------------
 # STEP 2: PROCESS DATA
@@ -340,52 +288,58 @@ else:
 
 print("\n--- Step 2: Processing Data ---")
 
-# Process ED data (adds intoxication classification)
-df = process_ed_data(
-    df,
-    diagnosis_col_primary="diagnosis_code_primary",
-    diagnosis_col_secondary="diagnosis_code_secondary",
-    date_col="year_month",
-    esito_col="disposition_code",
-)
+# Check if already processed
+if "is_intoxication" not in df.columns:
+    df = process_ed_data(
+        df,
+        diagnosis_col_primary="diagnosis_code_primary" if "diagnosis_code_primary" in df.columns else "diagnosis_code",
+        diagnosis_col_secondary="diagnosis_code_secondary" if "diagnosis_code_secondary" in df.columns else None,
+        date_col="year_month",
+        esito_col="disposition_code" if "disposition_code" in df.columns else None,
+    )
 
 # Add age groups
-df["age_group"] = df["age_years"].apply(assign_age_group)
+if "age_group" not in df.columns:
+    age_col = "age_years" if "age_years" in df.columns else "age"
+    if age_col in df.columns:
+        df["age_group"] = df[age_col].apply(assign_age_group)
+    else:
+        df["age_group"] = "Unknown"
 
 # Standardise sex column
-if "sex_registry" in df.columns:
-    df["sex"] = df["sex_registry"]
-elif "sex" not in df.columns:
-    df["sex"] = "Unknown"
+if "sex" not in df.columns:
+    if "sex_registry" in df.columns:
+        df["sex"] = df["sex_registry"]
+    else:
+        df["sex"] = "Unknown"
 
 # -----------------------------------------------------------------------------
-# STEP 3: URBAN/RURAL CLASSIFICATION
+# STEP 3: URBAN/RURAL CLASSIFICATION (OPTIONAL)
 # -----------------------------------------------------------------------------
 
 print("\n--- Step 3: Urban/Rural Classification ---")
 
-if "residence" in df.columns:
-    if FUA_LOOKUP_FILE.exists():
-        try:
-            mapping, lookup_df = setup_urban_rural_classification(FUA_LOOKUP_FILE)
-            df = add_urban_rural_column(df, "residence", mapping, "residence_type")
-            print(f"Classified {df['residence_type'].notna().sum():,} residence records")
-            print(df["residence_type"].value_counts())
-        except Exception as e:
-            print(f"Warning: Could not load FUA lookup: {e}")
-            df["residence_type"] = "Unknown"
-    else:
-        print(f"FUA lookup not found at {FUA_LOOKUP_FILE}")
-        print("Creating synthetic urban/rural classification...")
-        # For synthetic data, classify based on our known lists
-        urban_comuni = ["Milano", "Bergamo", "Brescia", "Monza", "Como", "Varese", "Pavia"]
-        df["residence_type"] = df["residence"].apply(
-            lambda x: "Urban" if x in urban_comuni else "Rural"
-        )
+HAS_RESIDENCE = RESIDENCE_COLUMN in df.columns
+
+if HAS_RESIDENCE and is_fua_available(FUA_LOOKUP_FILE):
+    try:
+        mapping, lookup_df = setup_urban_rural_classification(FUA_LOOKUP_FILE)
+        df = add_urban_rural_column(df, RESIDENCE_COLUMN, mapping, "residence_type")
+        print(f"Classified {df['residence_type'].notna().sum():,} residence records")
         print(df["residence_type"].value_counts())
-else:
-    print("No residence column found - skipping urban/rural classification")
+        HAS_RESIDENCE_TYPE = True
+    except Exception as e:
+        print(f"Warning: Could not load FUA lookup: {e}")
+        df["residence_type"] = "Unknown"
+        HAS_RESIDENCE_TYPE = False
+elif HAS_RESIDENCE:
+    print("FUA lookup not available - urban/rural classification skipped")
     df["residence_type"] = "Unknown"
+    HAS_RESIDENCE_TYPE = False
+else:
+    print("Residence column not available - urban/rural classification skipped")
+    df["residence_type"] = "Unknown"
+    HAS_RESIDENCE_TYPE = False
 
 # -----------------------------------------------------------------------------
 # STEP 4: STRATIFIED TREND ANALYSIS

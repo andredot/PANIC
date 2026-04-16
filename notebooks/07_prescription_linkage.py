@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-05_prescription_linkage.py
+07_prescription_linkage.py
 ==========================
 
-This script analyses the relationship between prescribing patterns and 
+Analyse the relationship between prescribing patterns and 
 drug intoxication presentations (Research Question 5).
 
 Key analyses:
@@ -20,7 +20,8 @@ REQUIRES:
 OUTPUTS:
 - Prescribing trend tables and charts
 - Chronic/sporadic user breakdown among intoxication cases
-- Correlation analysis: prescribing volume vs intoxication rate
+
+All configuration comes from config.py
 """
 
 import sys
@@ -34,40 +35,31 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
+# Import configuration
+from config import (
+    DATA_DIR, OUTPUT_DIR, FIGURES_DIR, TABLES_DIR,
+    PROCESSED_DIR, ED_DATA_FILE, PHARMA_SYNTHETIC_FILE,
+    LOMBARDY_POPULATION, PRIMARY_DRUG_CLASSES,
+    PRESCRIPTION_LOOKBACK_DAYS,
+    CHRONIC_USER_MIN_PRESCRIPTIONS, CHRONIC_USER_MAX_GAP_DAYS,
+    get_pharma_files,
+)
+
 # Check for Polars
 try:
     import polars as pl
     HAS_POLARS = True
+    print(f"[OK] Polars v{pl.__version__} available")
 except ImportError:
     HAS_POLARS = False
-    print("⚠ Polars not installed - using pandas (slower for large files)")
+    print("[--] Polars not installed - using pandas")
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-DATA_DIR = project_root / "data" / "raw"
-OUTPUT_DIR = project_root / "outputs"
-
-# File paths (UPDATE THESE)
-ED_FILE = DATA_DIR / "ed_presentations.csv"
-PHARMA_FILES = list(DATA_DIR.glob("pharma_*.csv"))
-
-# Lombardy population (approximate, for rate calculation)
-# Source: ISTAT - adjust as needed
-LOMBARDY_POPULATION = 10_000_000  # ~10 million
-
-# Drug classes to analyse
-DRUG_CLASSES_OF_INTEREST = [
-    "benzodiazepine",
-    "z_drug", 
-    "opioid",
-    "antidepressant",
-    "stimulant",
-]
-
 # Lookback period for prescription linkage (days before ED presentation)
-LOOKBACK_DAYS = 365
+LOOKBACK_DAYS = PRESCRIPTION_LOOKBACK_DAYS
 
 
 # =============================================================================
@@ -464,106 +456,105 @@ print("=" * 70)
 print("\n--- Checking Data Availability ---")
 
 if not HAS_POLARS:
-    print("⚠ Polars not available - pharmaceutical analysis will use pandas")
-    print("  This may be slow for large files. Consider installing polars.")
+    print("[--] Polars not available - pharmaceutical analysis will use pandas")
 
-if not ED_FILE.exists():
-    print(f"⚠ ED file not found: {ED_FILE}")
-    
-if not PHARMA_FILES:
-    print(f"⚠ No pharmaceutical files found in {DATA_DIR}")
-    print("  Looking for files matching: pharma_*.csv")
+# Find available data files
+pharma_files = get_pharma_files()
+processed_ed = PROCESSED_DIR / "ed_processed.csv"
+processed_pharma = PROCESSED_DIR / "pharma_processed.csv"
 
-# For demonstration, create synthetic data if files don't exist
-USE_SYNTHETIC = not ED_FILE.exists() or not PHARMA_FILES
+# Determine what data to use
+if processed_ed.exists() and processed_pharma.exists():
+    print(f"[OK] Found processed data files")
+    USE_SYNTHETIC = False
+    USE_PROCESSED = True
+elif ED_DATA_FILE.exists() and pharma_files:
+    print(f"[OK] Found raw data files")
+    USE_SYNTHETIC = False
+    USE_PROCESSED = False
+else:
+    print(f"[--] Data files not found - will generate synthetic data")
+    USE_SYNTHETIC = True
+    USE_PROCESSED = False
 
 if USE_SYNTHETIC:
     print("\n--- Creating SYNTHETIC DATA for demonstration ---")
     
-    np.random.seed(42)
+    from intox_analysis.data.generators import generate_ed_data, generate_pharma_data
+    from config import STUDY_YEARS
     
-    # Synthetic pharma data
-    n_pharma = 50000
-    years_pharma = np.random.choice([2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025],
-                                     n_pharma, p=[0.09, 0.10, 0.11, 0.11, 0.12, 0.12, 0.12, 0.12, 0.11])
-    
-    # Increasing benzo prescriptions over time
-    def get_drug_class(year):
-        if year >= 2023:
-            weights = [0.35, 0.12, 0.08, 0.25, 0.03, 0.17]
-        elif year >= 2020:
-            weights = [0.30, 0.10, 0.08, 0.25, 0.03, 0.24]
-        else:
-            weights = [0.22, 0.08, 0.08, 0.25, 0.03, 0.34]
-        classes = ["benzodiazepine", "z_drug", "opioid", "antidepressant", "stimulant", "other"]
-        return np.random.choice(classes, p=weights)
-    
-    drug_classes_pharma = [get_drug_class(y) for y in years_pharma]
-    
-    # Generate patient IDs (some will overlap with ED)
-    n_patients = 8000
-    patient_ids = [f"MB-{''.join(np.random.choice(list('0123456789ABCDEF'), 64))}" 
-                   for _ in range(n_patients)]
-    
-    pharma_df = pd.DataFrame({
-        "patient_id": np.random.choice(patient_ids, n_pharma),
-        "dispensing_date": pd.to_datetime([
-            f"{y}-{np.random.randint(1,13):02d}-{np.random.randint(1,29):02d}"
-            for y in years_pharma
-        ]),
-        "drug_class": drug_classes_pharma,
-        "ddd": np.random.uniform(5, 60, n_pharma),
-        "atc_code": ["N05BA12"] * n_pharma,  # Simplified
-    })
-    pharma_df["year"] = pharma_df["dispensing_date"].dt.year
-    
+    # Generate pharma data
+    pharma_df = generate_pharma_data(n_records=100000, years=STUDY_YEARS)
     print(f"Generated {len(pharma_df):,} synthetic prescription records")
     
-    # Synthetic ED data (subset of pharma patients + new patients)
-    n_ed = 3000
-    # 60% from pharma patients, 40% new
-    ed_patient_ids = (
-        list(np.random.choice(patient_ids, int(n_ed * 0.6))) +
-        [f"MB-{''.join(np.random.choice(list('0123456789ABCDEF'), 64))}" 
-         for _ in range(int(n_ed * 0.4))]
-    )
+    # Generate ED data
+    ed_df = generate_ed_data(n_records=50000, years=STUDY_YEARS)
     
-    years_ed = np.random.choice([2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025],
-                                 n_ed, p=[0.08, 0.09, 0.10, 0.11, 0.12, 0.12, 0.13, 0.13, 0.12])
+    # Filter to intoxications only and add required columns
+    from intox_analysis.data.schemas import classify_drug_intoxication
     
-    ed_df = pd.DataFrame({
-        "patient_id": ed_patient_ids,
-        "presentation_date": pd.to_datetime([
-            f"{y}-{np.random.randint(1,13):02d}-{np.random.randint(1,29):02d}"
-            for y in years_ed
-        ]),
-        "drug_class": np.random.choice(
-            ["Benzodiazepines", "Opioids", "Stimulants", "Antidepressants"],
-            n_ed, p=[0.55, 0.20, 0.15, 0.10]
-        ),
-    })
+    diag_col = "diagnosis_code" if "diagnosis_code" in ed_df.columns else "diagnosis_code_primary"
+    ed_df["_class"] = ed_df[diag_col].apply(lambda x: classify_drug_intoxication(str(x)))
+    ed_df["is_intoxication"] = ed_df["_class"].apply(lambda x: x["is_intoxication"])
+    ed_df["drug_class"] = ed_df["_class"].apply(lambda x: x["drug_class"])
+    ed_df = ed_df.drop(columns=["_class"])
+    
+    # Filter to intoxications
+    ed_df = ed_df[ed_df["is_intoxication"]].copy()
+    
+    # Create presentation_date from year_month
+    if "presentation_date" not in ed_df.columns:
+        ed_df["year_month"] = ed_df["year_month"].astype(str)
+        ed_df["presentation_date"] = pd.to_datetime(
+            ed_df["year_month"].str[:4] + "-" + ed_df["year_month"].str[4:6] + "-15"
+        )
     ed_df["year"] = ed_df["presentation_date"].dt.year
     
     print(f"Generated {len(ed_df):,} synthetic intoxication cases")
 
+elif USE_PROCESSED:
+    print("\n--- Loading Processed Data ---")
+    
+    ed_df = pd.read_csv(processed_ed)
+    
+    # Filter to intoxications
+    if "is_intoxication" in ed_df.columns:
+        ed_df = ed_df[ed_df["is_intoxication"]].copy()
+    
+    # Create presentation_date from year_month if needed
+    if "presentation_date" not in ed_df.columns and "year_month" in ed_df.columns:
+        ed_df["year_month"] = ed_df["year_month"].astype(str)
+        ed_df["presentation_date"] = pd.to_datetime(
+            ed_df["year_month"].str[:4] + "-" + ed_df["year_month"].str[4:6] + "-15"
+        )
+    if "year" not in ed_df.columns:
+        ed_df["year"] = ed_df["presentation_date"].dt.year
+    
+    print(f"  Loaded {len(ed_df):,} intoxication cases")
+    
+    pharma_df = pd.read_csv(processed_pharma)
+    print(f"  Loaded {len(pharma_df):,} prescription records")
+
 else:
-    # Load real data
-    print("\n--- Loading Real Data ---")
+    # Load raw data
+    print("\n--- Loading Raw Data ---")
     
-    ed_df = pd.read_csv(ED_FILE)
+    ed_df = pd.read_csv(ED_DATA_FILE)
     
-    # Rename columns to standard names
-    ed_column_mapping = {
-        "Codice Fiscale Assistito MICROBIO": "patient_id",
-        "Annomese_INGR": "year_month",
-        "Eta(calcolata)": "age_years",
-        "Sesso (anag ass.to)": "sex",
-        "Cod Diagnosi": "diagnosis_code_primary",
-        "Codice Esito": "disposition_code",
-    }
-    ed_df = ed_df.rename(columns={k: v for k, v in ed_column_mapping.items() if k in ed_df.columns})
+    # Rename columns
+    from config import ED_COLUMN_MAPPING
+    ed_df = ed_df.rename(columns={k: v for k, v in ED_COLUMN_MAPPING.items() if k in ed_df.columns})
     
-    # Create presentation_date from year_month (YYYYMM -> YYYY-MM-15)
+    # Classify intoxications
+    from intox_analysis.data.schemas import classify_drug_intoxication
+    diag_col = "diagnosis_code_primary" if "diagnosis_code_primary" in ed_df.columns else "diagnosis_code"
+    ed_df["_class"] = ed_df[diag_col].apply(lambda x: classify_drug_intoxication(str(x)))
+    ed_df["is_intoxication"] = ed_df["_class"].apply(lambda x: x["is_intoxication"])
+    ed_df["drug_class"] = ed_df["_class"].apply(lambda x: x["drug_class"])
+    ed_df = ed_df.drop(columns=["_class"])
+    ed_df = ed_df[ed_df["is_intoxication"]].copy()
+    
+    # Create presentation_date from year_month
     if "year_month" in ed_df.columns and "presentation_date" not in ed_df.columns:
         ed_df["year_month"] = ed_df["year_month"].astype(str)
         ed_df["presentation_date"] = pd.to_datetime(
@@ -571,56 +562,36 @@ else:
         )
     ed_df["year"] = ed_df["presentation_date"].dt.year
     
-    print(f"  Loaded {len(ed_df):,} ED records")
+    print(f"  Loaded {len(ed_df):,} intoxication cases")
     
     # Load pharma data
-    if HAS_POLARS:
-        from intox_analysis.data.pharmaceutical import (
-            scan_pharmaceutical_data,
-            add_derived_columns,
-        )
-        lf = scan_pharmaceutical_data(PHARMA_FILES)
+    if HAS_POLARS and any(f.stat().st_size > 100_000_000 for f in pharma_files):
+        from intox_analysis.data.pharmaceutical import scan_pharmaceutical_data, add_derived_columns
+        lf = scan_pharmaceutical_data([str(f) for f in pharma_files])
         lf = add_derived_columns(lf)
         pharma_df = lf.collect().to_pandas()
     else:
-        pharma_df = pd.concat([pd.read_csv(f) for f in PHARMA_FILES])
+        pharma_df = pd.concat([pd.read_csv(f) for f in pharma_files])
     
     # Rename pharma columns
-    pharma_column_mapping = {
-        "Codice Fiscale Assistito MICROBIO": "patient_id",
-        "Data Erogazione.Data": "dispensing_date",
-        "Cod Atc": "atc_code",
-        "DDD": "ddd",
-    }
-    pharma_df = pharma_df.rename(columns={k: v for k, v in pharma_column_mapping.items() if k in pharma_df.columns})
+    from config import PHARMA_COLUMN_MAPPING
+    pharma_df = pharma_df.rename(columns={k: v for k, v in PHARMA_COLUMN_MAPPING.items() if k in pharma_df.columns})
     
-    # Parse dispensing date
-    if "dispensing_date" in pharma_df.columns:
-        pharma_df["dispensing_date"] = pd.to_datetime(pharma_df["dispensing_date"], errors="coerce")
-    
-    # Add drug_class from ATC code
-    if "atc_code" in pharma_df.columns and "drug_class" not in pharma_df.columns:
-        def classify_atc(code):
-            if pd.isna(code):
-                return "other"
-            code = str(code).upper()
-            if code.startswith("N05BA") or code.startswith("N05CD"):
-                return "benzodiazepine"
-            elif code.startswith("N05CF"):
-                return "z_drug"
-            elif code.startswith("N02A"):
-                return "opioid"
-            elif code.startswith("N06A"):
-                return "antidepressant"
-            elif code.startswith("N06BA"):
-                return "stimulant"
-            else:
-                return "other"
-        pharma_df["drug_class"] = pharma_df["atc_code"].apply(classify_atc)
-    
+    print(f"  Loaded {len(pharma_df):,} prescription records")
+
+# Ensure required columns exist
+if "dispensing_date" in pharma_df.columns:
+    pharma_df["dispensing_date"] = pd.to_datetime(pharma_df["dispensing_date"], errors="coerce")
+
+# Add drug_class from ATC code if needed
+if "atc_code" in pharma_df.columns and "drug_class" not in pharma_df.columns:
+    from intox_analysis.data.pharmaceutical import classify_atc_code
+    pharma_df["drug_class"] = pharma_df["atc_code"].apply(
+        lambda x: classify_atc_code(str(x))["drug_class"] if pd.notna(x) else "other"
+    )
+
+if "year" not in pharma_df.columns and "dispensing_date" in pharma_df.columns:
     pharma_df["year"] = pharma_df["dispensing_date"].dt.year
-    
-    print(f"  Loaded {len(pharma_df):,} pharma records")
 
 # -----------------------------------------------------------------------------
 # STEP 1: DDD TRENDS

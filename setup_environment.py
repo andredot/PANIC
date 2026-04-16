@@ -11,8 +11,6 @@ Instructions:
 1. Open this file in Spyder
 2. Press F5 (or click Run) to execute
 3. Follow any prompts in the console
-
-Author: Generated for VDI environment
 """
 
 import subprocess
@@ -26,28 +24,24 @@ from pathlib import Path
 
 # Core packages - required for basic functionality
 CORE_PACKAGES = [
-    ("pandas", "DataFrame operations, CSV I/O"),
-    ("numpy", "Numerical computing"),
-    ("matplotlib", "Visualisations"),
+    ("pandas", "DataFrame operations, CSV I/O", True),
+    ("numpy", "Numerical computing", True),
+    ("matplotlib", "Visualisations", True),
+    ("scipy", "Statistical tests", True),
 ]
 
-# Analysis packages - required for full analysis
-ANALYSIS_PACKAGES = [
-    ("polars", "Fast processing of large pharmaceutical files (1GB+)"),
-    ("scipy", "Statistical tests"),
-]
-
-# Validation packages - for data quality and testing
-VALIDATION_PACKAGES = [
-    ("pandera", "DataFrame schema validation"),
-    ("pydantic", "Data validation and settings management"),
-    ("pytest", "Testing framework"),
-]
-
-# Optional packages - nice to have but not essential
+# Optional packages - enhanced features, pipeline works without them
 OPTIONAL_PACKAGES = [
-    ("seaborn", "Enhanced statistical visualisations"),
-    ("statsmodels", "Segmented regression / interrupted time series"),
+    ("polars", "Fast processing of large files (1GB+)", False),
+    ("seaborn", "Enhanced statistical visualisations", False),
+    ("statsmodels", "Segmented regression / ITS", False),
+]
+
+# Validation packages - recommended but not blocking
+VALIDATION_PACKAGES = [
+    ("pandera", "DataFrame schema validation", False),
+    ("pydantic", "Data validation", False),
+    ("pytest", "Testing framework", False),
 ]
 
 
@@ -67,7 +61,7 @@ def get_pip_command():
     if not in_venv:
         pip_args.append("--user")
     
-    return pip_args
+    return pip_args, not in_venv
 
 
 def install_package(package_name: str, pip_args: list) -> bool:
@@ -94,70 +88,63 @@ def install_package(package_name: str, pip_args: list) -> bool:
 
 
 def install_packages():
-    """Install all required packages."""
+    """Install all packages."""
     
     print("=" * 60)
     print("INSTALLING PACKAGES")
     print("=" * 60)
     
-    pip_args = get_pip_command()
+    pip_args, using_user = get_pip_command()
     
-    # Check if we're using --user flag
-    if "--user" in pip_args:
+    if using_user:
         print("\nNote: Installing with --user flag (not in virtual environment)")
     print()
     
-    # Install core packages
+    failed_required = []
+    
+    # Install core packages (required)
     print("Core packages (required):")
     print("-" * 40)
-    for package, description in CORE_PACKAGES:
-        print(f"  {package:15} - {description}...", end=" ")
+    for package, description, required in CORE_PACKAGES:
+        print(f"  {package:15} - {description}...", end=" ", flush=True)
         if install_package(package, pip_args):
             print("OK")
         else:
             print("FAILED")
-    
-    print()
-    
-    # Install analysis packages
-    print("Analysis packages (required):")
-    print("-" * 40)
-    for package, description in ANALYSIS_PACKAGES:
-        print(f"  {package:15} - {description}...", end=" ")
-        if install_package(package, pip_args):
-            print("OK")
-        else:
-            print("FAILED")
-    
-    print()
-    
-    # Install validation packages
-    print("Validation & testing packages:")
-    print("-" * 40)
-    for package, description in VALIDATION_PACKAGES:
-        print(f"  {package:15} - {description}...", end=" ")
-        if install_package(package, pip_args):
-            print("OK")
-        else:
-            print("FAILED")
+            if required:
+                failed_required.append(package)
     
     print()
     
     # Install optional packages
-    print("Optional packages (nice to have):")
+    print("Optional packages (enhanced features):")
     print("-" * 40)
-    for package, description in OPTIONAL_PACKAGES:
-        print(f"  {package:15} - {description}...", end=" ")
+    for package, description, _ in OPTIONAL_PACKAGES:
+        print(f"  {package:15} - {description}...", end=" ", flush=True)
         if install_package(package, pip_args):
             print("OK")
         else:
             print("skipped")
     
     print()
+    
+    # Install validation packages
+    print("Validation packages (recommended):")
+    print("-" * 40)
+    for package, description, _ in VALIDATION_PACKAGES:
+        print(f"  {package:15} - {description}...", end=" ", flush=True)
+        if install_package(package, pip_args):
+            print("OK")
+        else:
+            print("skipped")
+    
+    print()
+    
+    return len(failed_required) == 0
 
 
 def verify_installation():
-    """Verify that all required packages can be imported."""
+    """Verify that packages can be imported."""
     
     print("=" * 60)
     print("VERIFYING INSTALLATION")
@@ -165,31 +152,26 @@ def verify_installation():
     print()
     
     packages_to_check = [
-        # (import_name, display_name, required)
-        # Core
-        ("pandas", "pandas", True),
-        ("numpy", "numpy", True),
-        ("matplotlib.pyplot", "matplotlib", True),
-        # Analysis
-        ("polars", "polars", True),
-        ("scipy", "scipy", True),
-        # Validation
-        ("pandera", "pandera", True),
-        ("pydantic", "pydantic", True),
-        ("pytest", "pytest", True),
-        # Optional
-        ("seaborn", "seaborn", False),
-        ("statsmodels", "statsmodels", False),
+        # (import_name, display_name, required, fallback_msg)
+        ("pandas", "pandas", True, None),
+        ("numpy", "numpy", True, None),
+        ("matplotlib.pyplot", "matplotlib", True, None),
+        ("scipy", "scipy", True, None),
+        ("polars", "polars", False, "Will use pandas for pharma processing"),
+        ("seaborn", "seaborn", False, "Will use basic matplotlib"),
+        ("statsmodels", "statsmodels", False, "Segmented regression unavailable"),
+        ("pandera", "pandera", False, "Schema validation unavailable"),
+        ("pydantic", "pydantic", False, "Data validation unavailable"),
+        ("pytest", "pytest", False, "Testing unavailable"),
     ]
     
     all_required_ok = True
     
     print("Package               Version      Status")
-    print("-" * 50)
+    print("-" * 55)
     
-    for import_name, display_name, required in packages_to_check:
+    for import_name, display_name, required, fallback in packages_to_check:
         try:
-            # Import the package
             if "." in import_name:
                 main_pkg = import_name.split(".")[0]
             else:
@@ -198,16 +180,18 @@ def verify_installation():
             mod = __import__(main_pkg)
             version = getattr(mod, "__version__", "?")
             
-            req_marker = "*" if required else " "
-            print(f"  {display_name:18} {version:12} OK {req_marker}")
+            marker = "*" if required else " "
+            print(f"  {display_name:18} {version:12} OK {marker}")
             
-        except ImportError as e:
-            req_marker = "*" if required else " "
+        except ImportError:
+            marker = "*" if required else " "
             if required:
-                print(f"  {display_name:18} {'--':12} MISSING {req_marker}")
+                print(f"  {display_name:18} {'--':12} MISSING {marker}")
                 all_required_ok = False
             else:
                 print(f"  {display_name:18} {'--':12} not installed")
+                if fallback:
+                    print(f"      -> {fallback}")
     
     print()
     print("  * = required package")
@@ -224,7 +208,6 @@ def setup_python_path():
     print("=" * 60)
     print()
     
-    # Get the project root (where this script is located)
     project_root = Path(__file__).parent.resolve()
     
     if str(project_root) not in sys.path:
@@ -235,7 +218,7 @@ def setup_python_path():
     
     print()
     print("To make this permanent in Spyder:")
-    print("  1. Go to: Tools → PYTHONPATH manager")
+    print("  1. Go to: Tools -> PYTHONPATH manager")
     print(f"  2. Add: {project_root}")
     print()
 
@@ -248,58 +231,65 @@ def test_project_imports():
     print("=" * 60)
     print()
     
-    # Ensure project root is in path
     project_root = Path(__file__).parent.resolve()
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
     
     tests = [
-        ("intox_analysis.data.schemas", "ICD code classification"),
-        ("intox_analysis.data.generators", "Synthetic data generation"),
-        ("intox_analysis.data.residence", "Urban/rural classification"),
-        ("intox_analysis.data.pharmaceutical", "Pharmaceutical processing"),
-        ("intox_analysis.analysis.trends", "Trend analysis"),
+        ("intox_analysis.data.schemas", "ICD code classification", True),
+        ("intox_analysis.data.pharmaceutical", "Pharmaceutical processing", True),
+        ("intox_analysis.data.generators", "Synthetic data generation", True),
+        ("intox_analysis.data.residence", "Urban/rural classification", False),
+        ("intox_analysis.analysis.trends", "Trend analysis", True),
     ]
     
-    all_ok = True
-    for module_name, description in tests:
+    all_required_ok = True
+    for module_name, description, required in tests:
         try:
             __import__(module_name)
-            print(f"  ✓ {description}")
+            print(f"  + {description}")
         except ImportError as e:
-            print(f"  ✗ {description}: {e}")
-            all_ok = False
+            if required:
+                print(f"  x {description}: {e}")
+                all_required_ok = False
+            else:
+                print(f"  - {description} (optional, not loaded)")
     
     print()
-    return all_ok
+    return all_required_ok
 
 
-def print_summary():
+def print_summary(success: bool):
     """Print summary and next steps."""
     
     print("=" * 60)
-    print("SETUP COMPLETE")
+    if success:
+        print("SETUP COMPLETE")
+    else:
+        print("SETUP COMPLETED WITH WARNINGS")
     print("=" * 60)
     print("""
-Libraries installed:
-  Core:        pandas, numpy, matplotlib
-  Analysis:    polars, scipy
-  Validation:  pandera, pydantic, pytest
-  Optional:    seaborn, statsmodels
+Libraries:
+  Required:  pandas, numpy, matplotlib, scipy
+  Optional:  polars (fast files), statsmodels (regression), seaborn (plots)
+  Validation: pandera, pydantic, pytest
 
 Pipeline scripts (run in order):
-  1. notebooks/00_generate_synthetic_data.py  - Create test data
-  2. notebooks/03_intoxication_trends.py      - Drug class trends
-  3. notebooks/04_stratified_analysis.py      - Demographics
-  4. notebooks/05_prescription_linkage.py     - Pharma linkage
-  5. notebooks/06_generate_report.py          - Compile HTML report
+  00_verify_setup.py           - Check installation
+  01_load_ed_data.py           - Load ED data
+  02_load_pharma_data.py       - Load pharmaceutical data
+  05_intoxication_trends.py    - Drug class trends
+  06_stratified_analysis.py    - Demographics
+  07_prescription_linkage.py   - Pharma linkage
+  08_generate_report.py        - HTML report
 
 Data folders:
-  - data/raw/      <- Place your VDI CSV exports here
-  - data/lookups/  <- ISTAT FUA lookup (can commit to GitHub)
-  - outputs/       <- Generated figures, tables, reports
+  data/raw/      <- Place your VDI CSV exports here
+  data/lookups/  <- Optional lookup tables
+  outputs/       <- Generated figures, tables, reports
 
-GitHub: https://github.com/andredot/PANIC
+Configuration:
+  config.py      <- ALL study parameters (change here, propagates everywhere)
 """)
 
 
@@ -309,21 +299,19 @@ GitHub: https://github.com/andredot/PANIC
 
 if __name__ == "__main__":
     print()
-    print("╔" + "═" * 58 + "╗")
-    print("║     PANIC - Drug Intoxication Analysis Setup Wizard      ║")
-    print("╚" + "═" * 58 + "╝")
+    print("+" + "=" * 58 + "+")
+    print("|     PANIC - Drug Intoxication Analysis Setup Wizard      |")
+    print("+" + "=" * 58 + "+")
     print()
     
-    install_packages()
+    install_success = install_packages()
+    verify_success = verify_installation()
     
-    if verify_installation():
+    if verify_success:
         setup_python_path()
-        if test_project_imports():
-            print_summary()
-        else:
-            print("\n⚠ Some project imports failed.")
-            print("  Make sure you're running this from the project root.")
+        imports_success = test_project_imports()
+        print_summary(install_success and imports_success)
     else:
-        print("\n⚠ Some required packages are missing.")
+        print("\n! Some required packages are missing.")
         print("  Try installing them manually with:")
-        print("    pip install pandas numpy matplotlib polars scipy --user")
+        print("    pip install pandas numpy matplotlib scipy --user")

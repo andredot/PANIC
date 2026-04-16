@@ -1,23 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-06_generate_report.py
+08_generate_report.py
 =====================
 
-This script generates a comprehensive HTML report by compiling outputs from
-all previous analysis notebooks (00-05). It does NOT recalculate anything -
+Generate a comprehensive HTML report by compiling outputs from
+all previous analysis notebooks. It does NOT recalculate anything -
 it reads the saved tables and figures.
 
 PREREQUISITE: Run all notebooks in order before this one:
-  00_generate_synthetic_data.py  (or use real data)
-  03_intoxication_trends.py
-  04_stratified_analysis.py
-  05_prescription_linkage.py
+  01_load_ed_data.py
+  02_load_pharma_data.py
+  05_intoxication_trends.py
+  06_stratified_analysis.py
+  07_prescription_linkage.py
 
 OUTPUT:
   outputs/report_drug_intoxication_lombardy.html
 
 This approach uses only standard libraries (no Quarto, pandoc, etc.).
 The report can be opened in any web browser and printed to PDF if needed.
+
+All configuration comes from config.py
 """
 
 import sys
@@ -31,18 +34,21 @@ sys.path.insert(0, str(project_root))
 
 import pandas as pd
 
+# Import configuration
+from config import (
+    OUTPUT_DIR, FIGURES_DIR, TABLES_DIR,
+    STUDY_START_YEAR, STUDY_END_YEAR,
+)
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-OUTPUT_DIR = project_root / "outputs"
-FIGURES_DIR = OUTPUT_DIR / "figures"
-TABLES_DIR = OUTPUT_DIR / "tables"
 REPORT_PATH = OUTPUT_DIR / "report_drug_intoxication_lombardy.html"
 
 # Study metadata
 STUDY_TITLE = "Drug Intoxication Presentations in Lombardy"
-STUDY_SUBTITLE = "Trend Analysis and Characterisation Study (2017-2025)"
+STUDY_SUBTITLE = f"Trend Analysis and Characterisation Study ({STUDY_START_YEAR}-{STUDY_END_YEAR})"
 AUTHORS = "[Authors to be added]"
 REPORT_DATE = datetime.now().strftime("%d %B %Y")
 
@@ -471,7 +477,7 @@ Sporadic user: Fewer than 4 prescriptions per year or gaps >90 days.</p>
 
 <h3>2.4 Urban/Rural Classification</h3>
 <p>Residence was classified using the ISTAT Functional Urban Areas (FUA) 2021 classification. Municipalities 
-designated as a "Città" or "Greater City" were classified as urban; all others as rural.</p>
+designated as a "City" or "Greater City" were classified as urban; all others as rural.</p>
 
 <h3>2.5 Statistical Analysis</h3>
 <p>Descriptive analyses included annual and monthly counts, proportions, and trend metrics. Year-on-year growth 

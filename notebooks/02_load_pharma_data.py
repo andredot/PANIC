@@ -3,18 +3,19 @@
 02_load_pharma_data.py
 ======================
 
-This script demonstrates how to load and process pharmaceutical (Flusso F)
-data using Polars for memory efficiency. The pharmaceutical data is large
-(~1GB per year), so we use lazy evaluation to process it without loading
-everything into memory at once.
+Load and process pharmaceutical (Flusso F) data.
+
+This script works in two modes:
+- WITH polars: Lazy evaluation for large files (1GB+) - faster
+- WITHOUT polars: Uses pandas - slower but works everywhere
 
 This script shows:
-1. How to scan large CSV files with Polars lazy evaluation
+1. How to load pharmaceutical CSVs
 2. How to classify drugs by ATC code
 3. How to compute monthly prescription counts
 4. How to identify chronic users
 
-BEFORE RUNNING: Place your pharmaceutical CSVs in the data/raw/ folder.
+All configuration comes from config.py
 """
 
 import sys
@@ -24,321 +25,336 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+import pandas as pd
+import numpy as np
+
+# Import configuration
+from config import (
+    DATA_DIR, PROCESSED_DIR,
+    PHARMA_SYNTHETIC_FILE,
+    PHARMA_COLUMN_MAPPING, MISSING_VALUES,
+    STUDY_YEARS,
+    ATC_BENZODIAZEPINES, ATC_Z_DRUGS, ATC_OPIOIDS, ATC_ANTIDEPRESSANTS,
+    CHRONIC_USER_MIN_PRESCRIPTIONS, CHRONIC_USER_MAX_GAP_DAYS,
+    get_pharma_files,
+)
+
 # =============================================================================
-# CHECK POLARS INSTALLATION
+# CHECK POLARS AVAILABILITY
 # =============================================================================
 
 try:
     import polars as pl
-    print(f"✓ Polars version {pl.__version__} installed")
+    HAS_POLARS = True
+    print(f"[OK] Polars v{pl.__version__} available - using fast processing")
 except ImportError:
-    print("✗ Polars not installed!")
-    print("\nTo install, run in Anaconda Prompt:")
-    print("  pip install polars")
-    print("\nOr with conda:")
-    print("  conda install polars -c conda-forge")
-    sys.exit(1)
+    HAS_POLARS = False
+    print("[--] Polars not installed - using pandas (slower for large files)")
 
-# Import our pharmaceutical module
-from intox_analysis.data.pharmaceutical import (
-    classify_atc_code,
-    scan_pharmaceutical_data,
-    add_derived_columns,
-    monthly_prescription_counts,
-    identify_chronic_users,
-    generate_synthetic_pharmaceutical_data,
-    ATC_BENZODIAZEPINES,
-    ATC_Z_DRUGS,
-)
+# Import pharmaceutical module
+from intox_analysis.data.pharmaceutical import classify_atc_code
 
 # =============================================================================
-# CONFIGURATION - UPDATE THESE FOR YOUR DATA
+# CONFIGURATION
 # =============================================================================
 
-DATA_DIR = project_root / "data" / "raw"
-
-# List your pharmaceutical CSV files here (one per year)
-# Update these filenames to match your actual files!
-PHARMA_FILES = [
-    DATA_DIR / "pharma_2017.csv",
-    DATA_DIR / "pharma_2018.csv",
-    DATA_DIR / "pharma_2019.csv",
-    DATA_DIR / "pharma_2020.csv",
-    DATA_DIR / "pharma_2021.csv",
-    DATA_DIR / "pharma_2022.csv",
-    DATA_DIR / "pharma_2023.csv",
-    DATA_DIR / "pharma_2024.csv",
-    DATA_DIR / "pharma_2025.csv",
-]
-
-# Only keep files that actually exist
-PHARMA_FILES = [f for f in PHARMA_FILES if f.exists()]
+# Generate synthetic data if no files found
+GENERATE_SYNTHETIC_IF_MISSING = True
 
 # =============================================================================
-# STEP 1: EXPLORE ATC CODE CLASSIFICATION
+# HELPER FUNCTIONS (pandas fallback)
 # =============================================================================
 
-print("\n" + "=" * 70)
-print("STEP 1: ATC Code Classification")
-print("=" * 70)
+def classify_atc_vectorized(atc_series: pd.Series) -> pd.DataFrame:
+    """Classify a series of ATC codes."""
+    results = atc_series.apply(lambda x: classify_atc_code(str(x)) if pd.notna(x) else {
+        "drug_class": "unknown", "is_benzodiazepine": False, "is_z_drug": False,
+        "is_opioid": False, "is_psychotropic": False
+    })
+    return pd.DataFrame(results.tolist())
 
-# Test with drugs confirmed in your VDI data
-test_drugs = [
-    ("N05BA12", "ALPRAZOLAM"),
-    ("N05BA06", "LORAZEPAM"),
-    ("N05CF01", "ZOPICLONE"),
-    ("N05CF02", "ZOLPIDEM"),
-    ("N05AL07", "LEVOSULPIRIDE"),
-    ("N06AB06", "SERTRALINE"),
-    ("N02AX02", "TRAMADOL"),
-    ("A02BC01", "OMEPRAZOLE"),  # Not psychotropic (control)
-]
 
-print("\nDrug Classification Results:")
-print("-" * 50)
-for atc, name in test_drugs:
-    result = classify_atc_code(atc)
-    is_psych = "✓ Psychotropic" if result["is_psychotropic"] else "✗ Not psychotropic"
-    print(f"{atc} ({name})")
-    print(f"  {is_psych} | Class: {result['drug_class']}")
-
-# Show known drug lists
-print(f"\nKnown benzodiazepines in database: {len(ATC_BENZODIAZEPINES)}")
-print(f"Known Z-drugs in database: {len(ATC_Z_DRUGS)}")
-
-# =============================================================================
-# STEP 2: LOAD PHARMACEUTICAL DATA
-# =============================================================================
-
-print("\n" + "=" * 70)
-print("STEP 2: Loading Pharmaceutical Data")
-print("=" * 70)
-
-if not PHARMA_FILES:
-    print("\n⚠ No pharmaceutical data files found!")
-    print(f"  Looking in: {DATA_DIR}")
-    print("\nTo proceed with your actual data:")
-    print("1. Export pharmaceutical data from VDI as CSV files")
-    print("2. Place them in:", DATA_DIR)
-    print("3. Update PHARMA_FILES list above with correct filenames")
-    print("4. Re-run this script")
+def load_pharma_pandas(file_path: Path) -> pd.DataFrame:
+    """Load pharmaceutical data with pandas."""
+    print(f"  Loading {file_path.name}...", end=" ", flush=True)
     
-    print("\n" + "-" * 40)
-    print("Using SYNTHETIC DATA for demonstration...")
-    print("-" * 40)
-    
-    # Generate synthetic data for demonstration
-    print("Generating 50,000 synthetic prescription records...")
-    df = generate_synthetic_pharmaceutical_data(
-        n_records=50_000,
-        n_patients=5_000,
-        start_year=2017,
-        end_year=2025,
-        seed=42,
+    df = pd.read_csv(
+        file_path,
+        na_values=MISSING_VALUES,
+        low_memory=False,
     )
-    print(f"Generated {len(df):,} records for {df['patient_id'].n_unique():,} patients")
     
-    # Convert to lazy frame for consistent API
-    lf = df.lazy()
+    print(f"{len(df):,} rows")
+    return df
+
+
+def process_pharma_pandas(df: pd.DataFrame) -> pd.DataFrame:
+    """Process pharmaceutical data with pandas."""
+    # Rename columns
+    cols_to_rename = {k: v for k, v in PHARMA_COLUMN_MAPPING.items() if k in df.columns}
+    df = df.rename(columns=cols_to_rename)
+    
+    # Classify ATC codes
+    atc_col = "atc_code" if "atc_code" in df.columns else None
+    if atc_col is None:
+        atc_cols = [c for c in df.columns if "atc" in c.lower()]
+        atc_col = atc_cols[0] if atc_cols else None
+    
+    if atc_col:
+        print("  Classifying ATC codes...", end=" ", flush=True)
+        classifications = classify_atc_vectorized(df[atc_col])
+        df["drug_class"] = classifications["drug_class"]
+        df["is_benzodiazepine"] = classifications["is_benzodiazepine"]
+        df["is_z_drug"] = classifications["is_z_drug"]
+        df["is_opioid"] = classifications["is_opioid"]
+        df["is_psychotropic"] = classifications["is_psychotropic"]
+        print("Done!")
+    
+    # Parse dates
+    date_col = "dispensing_date" if "dispensing_date" in df.columns else None
+    if date_col is None:
+        date_cols = [c for c in df.columns if "data" in c.lower() or "date" in c.lower()]
+        date_col = date_cols[0] if date_cols else None
+    
+    if date_col:
+        df["dispensing_date"] = pd.to_datetime(df[date_col], errors="coerce")
+        df["year"] = df["dispensing_date"].dt.year
+        df["year_month"] = df["dispensing_date"].dt.to_period("M").astype(str)
+    
+    return df
+
+
+# =============================================================================
+# POLARS FUNCTIONS (if available)
+# =============================================================================
+
+if HAS_POLARS:
+    from intox_analysis.data.pharmaceutical import (
+        scan_pharmaceutical_data,
+        add_derived_columns,
+    )
+
+
+# =============================================================================
+# STEP 1: LOAD DATA
+# =============================================================================
+
+print("\n" + "=" * 70)
+print("STEP 1: Loading Pharmaceutical Data")
+print("=" * 70)
+
+# Find available files
+pharma_files = get_pharma_files()
+
+if pharma_files:
+    print(f"\nFound {len(pharma_files)} pharmaceutical file(s):")
+    for f in pharma_files:
+        size_mb = f.stat().st_size / (1024 * 1024)
+        print(f"  - {f.name} ({size_mb:.1f} MB)")
+    
+    USE_SYNTHETIC = False
+    
+    if HAS_POLARS and any(f.stat().st_size > 100_000_000 for f in pharma_files):
+        # Use polars for large files
+        print("\nUsing Polars for large file processing...")
+        lf = scan_pharmaceutical_data([str(f) for f in pharma_files])
+        lf = add_derived_columns(lf)
+        
+        # Collect a sample first
+        print("Collecting data...", end=" ", flush=True)
+        df_pharma = lf.collect()
+        df_pharma = df_pharma.to_pandas()
+        print(f"Done! {len(df_pharma):,} rows")
+    else:
+        # Use pandas
+        print("\nUsing pandas for processing...")
+        dfs = [load_pharma_pandas(f) for f in pharma_files]
+        df_pharma = pd.concat(dfs, ignore_index=True)
+        df_pharma = process_pharma_pandas(df_pharma)
+
+elif GENERATE_SYNTHETIC_IF_MISSING:
+    print("\nNo pharmaceutical files found.")
+    print("Generating synthetic data for testing...")
+    
+    from intox_analysis.data.generators import generate_pharma_data
+    
+    df_pharma = generate_pharma_data(n_records=100000, years=STUDY_YEARS)
+    
+    # Save for future use
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    df_pharma.to_csv(PHARMA_SYNTHETIC_FILE, index=False)
+    print(f"Saved synthetic data to: {PHARMA_SYNTHETIC_FILE}")
+    print(f"Generated {len(df_pharma):,} rows")
+    
     USE_SYNTHETIC = True
 
 else:
-    print(f"\nFound {len(PHARMA_FILES)} pharmaceutical data files:")
-    for f in PHARMA_FILES:
-        size_mb = f.stat().st_size / (1024 * 1024)
-        print(f"  • {f.name} ({size_mb:.1f} MB)")
-    
-    # Scan files lazily - this does NOT load data into memory yet!
-    print("\nCreating lazy scan (no memory used yet)...")
-    lf = scan_pharmaceutical_data(PHARMA_FILES)
-    USE_SYNTHETIC = False
-    print("✓ Lazy frame created")
+    print("\nNo pharmaceutical files found!")
+    print(f"Place CSV files in: {DATA_DIR}")
+    raise FileNotFoundError("No pharmaceutical data available")
 
 # =============================================================================
-# STEP 3: ADD DERIVED COLUMNS
+# STEP 2: DATA EXPLORATION
 # =============================================================================
 
 print("\n" + "=" * 70)
-print("STEP 3: Adding Derived Columns")
+print("STEP 2: Data Exploration")
 print("=" * 70)
 
-# This adds drug class flags, year_month, etc.
-# Still lazy - no computation happens yet!
-lf_enriched = add_derived_columns(lf)
+print(f"\nTotal records: {len(df_pharma):,}")
+print(f"Columns: {len(df_pharma.columns)}")
 
-print("Added columns:")
-print("  • year_month (YYYYMM)")
-print("  • year, month")
-print("  • is_benzodiazepine (bool)")
-print("  • is_z_drug (bool)")
-print("  • is_opioid (bool)")
-print("  • is_antidepressant (bool)")
-print("  • is_psychotropic (bool)")
-print("  • drug_class (categorical)")
-print("  • days_to_dispense")
+# Date range
+if "year" in df_pharma.columns:
+    print(f"\nYear range: {df_pharma['year'].min()} to {df_pharma['year'].max()}")
+
+# Patient count
+patient_col = "patient_id" if "patient_id" in df_pharma.columns else None
+if patient_col:
+    n_patients = df_pharma[patient_col].nunique()
+    print(f"Unique patients: {n_patients:,}")
+
+# Drug class distribution
+if "drug_class" in df_pharma.columns:
+    print(f"\nDrug class distribution:")
+    class_counts = df_pharma["drug_class"].value_counts()
+    for drug_class, count in class_counts.head(10).items():
+        pct = 100 * count / len(df_pharma)
+        print(f"  {drug_class}: {count:,} ({pct:.1f}%)")
+
+# Psychotropic prescriptions
+if "is_psychotropic" in df_pharma.columns:
+    n_psychotropic = df_pharma["is_psychotropic"].sum()
+    print(f"\nPsychotropic prescriptions: {n_psychotropic:,} ({100*n_psychotropic/len(df_pharma):.1f}%)")
 
 # =============================================================================
-# STEP 4: COMPUTE MONTHLY COUNTS (This is where computation happens!)
+# STEP 3: MONTHLY PRESCRIPTION COUNTS
 # =============================================================================
 
 print("\n" + "=" * 70)
-print("STEP 4: Monthly Prescription Counts")
+print("STEP 3: Monthly Prescription Counts")
 print("=" * 70)
 
-# This builds a query but still doesn't execute it
-query = monthly_prescription_counts(
-    lf_enriched,
-    drug_classes=["benzodiazepine", "z_drug"],  # Focus on sedatives
-    by_drug_class=True,
-)
-
-# NOW we execute the query with .collect()
-# For large files, this is where you'll see memory usage
-print("\nExecuting query (this loads and processes data)...")
-monthly_df = query.collect()
-print(f"✓ Query complete: {len(monthly_df):,} rows")
-
-# Show results
-print("\nMonthly prescription counts (first 20 rows):")
-print(monthly_df.head(20))
+if "year_month" in df_pharma.columns and "drug_class" in df_pharma.columns:
+    monthly = df_pharma.groupby(["year_month", "drug_class"]).size().reset_index(name="n_prescriptions")
+    monthly = monthly.sort_values("year_month")
+    
+    print(f"\nMonthly data points: {len(monthly):,}")
+    
+    # Benzodiazepine trend
+    benzo_monthly = monthly[monthly["drug_class"] == "benzodiazepine"]
+    if len(benzo_monthly) > 0:
+        print(f"\nBenzodiazepine prescriptions:")
+        print(f"  Months with data: {len(benzo_monthly)}")
+        print(f"  Monthly mean: {benzo_monthly['n_prescriptions'].mean():.0f}")
+        print(f"  Monthly range: {benzo_monthly['n_prescriptions'].min()} to {benzo_monthly['n_prescriptions'].max()}")
 
 # =============================================================================
-# STEP 5: OVERALL STATISTICS
+# STEP 4: IDENTIFY CHRONIC USERS
 # =============================================================================
 
 print("\n" + "=" * 70)
-print("STEP 5: Summary Statistics")
+print("STEP 4: Chronic vs Sporadic Users")
 print("=" * 70)
 
-# Quick overall stats (collect a small summary)
-summary = (
-    lf_enriched
-    .select([
-        pl.len().alias("total_prescriptions"),
-        pl.col("patient_id").n_unique().alias("unique_patients"),
-        pl.col("is_benzodiazepine").sum().alias("n_benzodiazepine"),
-        pl.col("is_z_drug").sum().alias("n_z_drug"),
-        pl.col("is_opioid").sum().alias("n_opioid"),
-        pl.col("is_antidepressant").sum().alias("n_antidepressant"),
-        pl.col("is_psychotropic").sum().alias("n_psychotropic_total"),
-        pl.col("age_years").mean().alias("mean_age"),
-        (pl.col("sex") == "F").mean().alias("prop_female"),
-    ])
-    .collect()
-)
-
-print("\nOverall Summary:")
-print(f"  Total prescriptions: {summary['total_prescriptions'][0]:,}")
-print(f"  Unique patients: {summary['unique_patients'][0]:,}")
-print(f"  Mean age: {summary['mean_age'][0]:.1f} years")
-print(f"  % Female: {100*summary['prop_female'][0]:.1f}%")
-print()
-print("Psychotropic Drug Prescriptions:")
-print(f"  Benzodiazepines: {summary['n_benzodiazepine'][0]:,}")
-print(f"  Z-drugs: {summary['n_z_drug'][0]:,}")
-print(f"  Opioids: {summary['n_opioid'][0]:,}")
-print(f"  Antidepressants: {summary['n_antidepressant'][0]:,}")
-print(f"  Total psychotropic: {summary['n_psychotropic_total'][0]:,}")
+if patient_col and "dispensing_date" in df_pharma.columns and "drug_class" in df_pharma.columns:
+    
+    # Focus on benzodiazepines
+    df_benzo = df_pharma[df_pharma["drug_class"] == "benzodiazepine"].copy()
+    
+    if len(df_benzo) > 0:
+        # Count prescriptions per patient per year
+        df_benzo["year"] = pd.to_datetime(df_benzo["dispensing_date"]).dt.year
+        patient_yearly = df_benzo.groupby([patient_col, "year"]).size().reset_index(name="n_rx")
+        
+        # Classify: >= CHRONIC_USER_MIN_PRESCRIPTIONS = chronic
+        patient_yearly["user_type"] = np.where(
+            patient_yearly["n_rx"] >= CHRONIC_USER_MIN_PRESCRIPTIONS,
+            "chronic",
+            "sporadic"
+        )
+        
+        # Summary
+        user_summary = patient_yearly.groupby("user_type").agg(
+            n_patient_years=("n_rx", "count"),
+            mean_rx_per_year=("n_rx", "mean"),
+        ).round(1)
+        
+        print(f"\nBenzodiazepine user classification (threshold: {CHRONIC_USER_MIN_PRESCRIPTIONS}+ Rx/year):")
+        print(user_summary)
+        
+        n_chronic = (patient_yearly["user_type"] == "chronic").sum()
+        n_total = len(patient_yearly)
+        print(f"\nChronic user-years: {n_chronic:,} ({100*n_chronic/n_total:.1f}%)")
 
 # =============================================================================
-# STEP 6: IDENTIFY CHRONIC USERS
+# STEP 5: DDD ANALYSIS (if available)
 # =============================================================================
 
 print("\n" + "=" * 70)
-print("STEP 6: Identifying Chronic Users")
+print("STEP 5: DDD Analysis")
 print("=" * 70)
 
-print("\nDefinition: ≥4 prescriptions/year over ≥90 days")
-print("(This helps distinguish therapeutic use from sporadic/misuse)")
-
-# Identify chronic benzodiazepine users
-chronic = identify_chronic_users(
-    lf_enriched,
-    drug_classes=["benzodiazepine", "z_drug"],
-    min_prescriptions_per_year=4,
-).collect()
-
-n_chronic = chronic["is_chronic"].sum()
-n_total = len(chronic)
-print(f"\nPatients with benzo/Z-drug prescriptions: {n_total:,}")
-print(f"Chronic users (≥4 Rx/year): {n_chronic:,} ({100*n_chronic/n_total:.1f}%)")
-print(f"Sporadic users (<4 Rx/year): {n_total - n_chronic:,} ({100*(n_total-n_chronic)/n_total:.1f}%)")
-
-# Distribution of prescriptions among chronic users
-chronic_stats = chronic.filter(pl.col("is_chronic")).select([
-    pl.col("n_prescriptions").mean().alias("mean_rx"),
-    pl.col("n_prescriptions").median().alias("median_rx"),
-    pl.col("duration_days").mean().alias("mean_duration"),
-])
-print(f"\nAmong chronic users:")
-print(f"  Mean prescriptions: {chronic_stats['mean_rx'][0]:.1f}")
-print(f"  Median prescriptions: {chronic_stats['median_rx'][0]:.1f}")
-print(f"  Mean duration of use: {chronic_stats['mean_duration'][0]:.0f} days")
+if "ddd" in df_pharma.columns:
+    ddd = pd.to_numeric(df_pharma["ddd"], errors="coerce")
+    
+    print(f"\nDDD statistics:")
+    print(f"  Records with DDD: {ddd.notna().sum():,}")
+    print(f"  Mean DDD: {ddd.mean():.2f}")
+    print(f"  Total DDD: {ddd.sum():,.0f}")
+    
+    # By drug class
+    if "drug_class" in df_pharma.columns:
+        df_pharma["ddd_numeric"] = ddd
+        ddd_by_class = df_pharma.groupby("drug_class")["ddd_numeric"].sum().sort_values(ascending=False)
+        
+        print(f"\nTotal DDD by drug class:")
+        for drug_class, total in ddd_by_class.head(5).items():
+            print(f"  {drug_class}: {total:,.0f}")
+else:
+    print("\nDDD column not available in this dataset")
 
 # =============================================================================
-# STEP 7: TIME TREND VISUALISATION (if matplotlib available)
+# STEP 6: SAVE OUTPUTS
 # =============================================================================
 
 print("\n" + "=" * 70)
-print("STEP 7: Visualisation (Optional)")
+print("STEP 6: Saving Outputs")
 print("=" * 70)
 
-try:
-    import matplotlib.pyplot as plt
-    
-    # Prepare data for plotting
-    plot_data = (
-        monthly_df
-        .group_by("year_month")
-        .agg(pl.col("n_prescriptions").sum())
-        .sort("year_month")
-        .to_pandas()
-    )
-    
-    # Create figure
-    fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(range(len(plot_data)), plot_data["n_prescriptions"], marker="o", markersize=3)
-    ax.set_xlabel("Month (from Jan 2017)")
-    ax.set_ylabel("Total Benzo + Z-drug Prescriptions")
-    ax.set_title("Monthly Benzodiazepine and Z-drug Prescriptions")
-    
-    # Add COVID line if in range
-    covid_month = (2020 - 2017) * 12 + 2  # March 2020
-    if covid_month < len(plot_data):
-        ax.axvline(covid_month, color="red", linestyle="--", alpha=0.7, label="COVID-19 (Mar 2020)")
-        ax.legend()
-    
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    
-    # Save figure
-    output_dir = project_root / "outputs" / "figures"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    fig_path = output_dir / "pharma_monthly_trend.png"
-    plt.savefig(fig_path, dpi=150)
-    print(f"✓ Figure saved: {fig_path}")
-    
-    # Show in Spyder
-    plt.show()
-    
-except ImportError:
-    print("matplotlib not available - skipping visualisation")
-    print("Install with: pip install matplotlib")
+PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
+# Save processed data
+output_file = PROCESSED_DIR / "pharma_processed.csv"
+df_pharma.to_csv(output_file, index=False)
+print(f"\nSaved: {output_file}")
+
+# Save monthly aggregates
+if "year_month" in df_pharma.columns and "drug_class" in df_pharma.columns:
+    monthly_file = PROCESSED_DIR / "pharma_monthly.csv"
+    monthly.to_csv(monthly_file, index=False)
+    print(f"Saved: {monthly_file}")
 
 # =============================================================================
-# DONE
+# SUMMARY
 # =============================================================================
 
 print("\n" + "=" * 70)
-print("DONE!")
+print("SUMMARY")
 print("=" * 70)
 
-print("\nVariables available in Variable Explorer:")
-print("  • lf_enriched: Polars LazyFrame with all data (use .collect() to load)")
-print("  • monthly_df: Monthly prescription counts")
-print("  • chronic: Patient-level chronic user identification")
-print("  • summary: Overall statistics")
+n_benzo = (df_pharma["drug_class"] == "benzodiazepine").sum() if "drug_class" in df_pharma.columns else 0
 
-if USE_SYNTHETIC:
-    print("\n⚠ Note: Results above are based on SYNTHETIC data.")
-    print("   Replace with your actual VDI data for real analysis.")
+print(f"""
+Data source: {'Synthetic' if USE_SYNTHETIC else 'Real VDI data'}
+Processing: {'Polars' if HAS_POLARS else 'Pandas'}
+Total records: {len(df_pharma):,}
+Benzodiazepine Rx: {n_benzo:,}
+
+Variables available in Spyder:
+  df_pharma - Full pharmaceutical dataset
+  monthly   - Monthly aggregates by drug class
+
+Next step: Run 05_intoxication_trends.py
+""")
+print("=" * 70)

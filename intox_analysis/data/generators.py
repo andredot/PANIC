@@ -242,14 +242,14 @@ def generate_fua_lookup() -> pd.DataFrame:
         records.append({
             "Comune": comune,
             "Provincia": "Lombardia",
-            "Città (City/Greater City) 2021": comune,
+            "City (City/Greater City) 2021": comune,
             "FUA": f"FUA_{comune}",
         })
     for comune in RURAL_COMUNI:
         records.append({
             "Comune": comune,
             "Provincia": "Lombardia",
-            "Città (City/Greater City) 2021": "No City/Città",
+            "City (City/Greater City) 2021": "No City",
             "FUA": "",
         })
     return pd.DataFrame(records)
