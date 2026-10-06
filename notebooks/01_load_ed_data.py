@@ -73,7 +73,7 @@ elif GENERATE_SYNTHETIC_IF_MISSING:
     from intox_analysis.data.generators import generate_ed_data
     
     # Generate synthetic ED data
-    df = generate_ed_data(n_records=50000, years=STUDY_YEARS)
+    df = generate_ed_data(n_records=50000)
     
     # Save for future use
     DATA_DIR.mkdir(parents=True, exist_ok=True)

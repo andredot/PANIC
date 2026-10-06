@@ -97,7 +97,7 @@ else:
     from intox_analysis.data.generators import generate_ed_data
     from config import STUDY_YEARS
     
-    df = generate_ed_data(n_records=50000, years=STUDY_YEARS)
+    df = generate_ed_data(n_records=50000)
     print(f"Generated {len(df):,} synthetic records")
     USE_SYNTHETIC = True
 

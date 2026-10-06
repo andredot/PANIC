@@ -1,61 +1,85 @@
 """
-Data Schemas and ICD Code Classification
-=========================================
+Data schemas and validation for Lombardy Emergency Department data.
 
-This module provides functions for classifying ICD-9 and ICD-10 diagnosis codes
-to identify drug intoxication cases. It's designed to work with Lombardy ED data.
+This module defines the expected structure of ED presentation data, including:
+- Pandera schemas for DataFrame validation
+- Pydantic models for individual records
+- ICD-9 to ICD-10 code mappings for drug intoxications
+- Constants for categorical variables (sex, esito, etc.)
 
-Key Functions:
-    is_drug_intoxication_icd9(code) - Check if ICD-9 code is drug poisoning
-    is_drug_intoxication_icd10(code) - Check if ICD-10 code is drug poisoning
-    classify_drug_intoxication(code) - Get detailed classification
-    is_missing(value) - Check if a value represents missing data
-
-Example:
-    >>> is_drug_intoxication_icd9("9694")
-    True
-    >>> classify_drug_intoxication("T424X2A")
-    {'is_intoxication': True, 'coding_system': 'ICD-10', 
-     'drug_class': 'benzodiazepine', 'intent': 'Intentional self-harm'}
+The schemas mirror the actual data structure from the Lombardy regional
+syndromic surveillance system, with pseudonymised identifiers.
 """
 
+from __future__ import annotations
+
 import re
-from typing import Optional, Dict, Any, Set
+from datetime import date
+from enum import Enum
+from typing import Annotated, Literal
+
+import pandas as pd
+import pandera as pa
+from pandera.typing import Series
+from pydantic import BaseModel, Field, field_validator
+
 
 # =============================================================================
-# ED DISPOSITION CODES (Esito)
+# CONSTANTS AND ENUMERATIONS
 # =============================================================================
 
-# Confirmed from VDI: "1" = discharged home
-# Other codes are provisional - verify against VDI codebook
-ESITO_CODES = {
-    "1": "Discharged home (DIMISSIONE A DOMICILIO)",  # CONFIRMED
-    "2": "Admitted to ordinary ward",                  # Provisional
-    "3": "Admitted to day hospital",                   # Provisional
-    "4": "Admitted to ICU",                            # Provisional
-    "5": "Transferred to another facility",            # Provisional
-    "6": "Died in ED",                                 # Provisional
-    "7": "Refused admission / left AMA",               # Provisional
-    "8": "Left without being seen",                    # Provisional
+class Sex(str, Enum):
+    """Biological sex categories as coded in Lombardy health data."""
+    FEMALE = "F"
+    MALE = "M"
+    UNKNOWN = "U"  # May appear for data quality issues
+
+
+class EsitoED(str, Enum):
+    """
+    ED disposition codes (Codice Esito).
+    
+    These codes indicate the patient's status at the end of the ED encounter.
+    CONFIRMED from VDI:
+        "1" = "DIMISSIONE A DOMICILIO" (discharged home)
+    
+    Values below are provisional based on standard Italian ED data flows;
+    verify against actual codebook in the VDI environment.
+    """
+    DIMISSIONE_DOMICILIO = "1"       # CONFIRMED: Discharged home
+    RICOVERO_ORDINARIO = "2"         # Admitted to ordinary ward (provisional)
+    RICOVERO_DH = "3"                # Admitted to day hospital (provisional)
+    RICOVERO_TERAPIA_INTENSIVA = "4" # Admitted to ICU (provisional)
+    TRASFERIMENTO = "5"              # Transferred to another facility (provisional)
+    DECESSO = "6"                    # Died in ED (provisional)
+    RIFIUTO_RICOVERO = "7"           # Refused admission/left AMA (provisional)
+    ABBANDONO = "8"                  # Left without being seen (provisional)
+    # TODO: Verify codes 2-8 against actual VDI codebook
+
+
+# Esito codes that indicate hospital admission (for SDO linkage).
+# Transfers (code 5) are counted as admissions: a transfer out of the ED
+# typically ends in admission at the receiving facility.
+ADMISSION_ESITO_CODES = {
+    EsitoED.RICOVERO_ORDINARIO.value,
+    EsitoED.RICOVERO_DH.value,
+    EsitoED.RICOVERO_TERAPIA_INTENSIVA.value,
+    EsitoED.TRASFERIMENTO.value,
 }
 
-# Codes that indicate hospital admission (for linking to SDO)
-ADMISSION_CODES = {"2", "3", "4"}
-
 
 # =============================================================================
-# MISSING VALUE HANDLING
+# MISSING VALUE CONVENTIONS
 # =============================================================================
 
-# Values observed in VDI that indicate missing/not applicable
+# Values observed in VDI that indicate missing/not applicable data
+# CONFIRMED: Secondary diagnosis uses "_" when not applicable
 MISSING_VALUE_MARKERS = {"_", "DATO NON APPLICABILE", "", None}
 
 
-def is_missing(value: Optional[str]) -> bool:
+def is_missing(value: str | None) -> bool:
     """
-    Check if a value represents missing data in the Lombardy dataset.
-    
-    The VDI uses "_" and "DATO NON APPLICABILE" for missing values.
+    Check if a value represents missing data in the Lombardy ED dataset.
     
     Parameters
     ----------
@@ -86,45 +110,90 @@ def is_missing(value: Optional[str]) -> bool:
 
 
 # =============================================================================
-# ICD-9 CODE CLASSIFICATION
+# ICD CODE DEFINITIONS FOR DRUG INTOXICATION
 # =============================================================================
 
-# ICD-9-CM drug poisoning codes: 960-979
-ICD9_DRUG_GROUPS = {
-    "960": "Antibiotics",
-    "961": "Other anti-infectives",
-    "962": "Hormones",
-    "963": "Systemic agents",
-    "964": "Blood agents",
-    "965": "Analgesics (including opioids)",
-    "966": "Anticonvulsants",
-    "967": "Sedatives and hypnotics",
-    "968": "CNS depressants and anesthetics",
-    "969": "Psychotropic agents",
-    "970": "CNS stimulants",
-    "971": "Autonomic drugs",
-    "972": "Cardiovascular agents",
-    "973": "GI agents",
-    "974": "Metabolic drugs",
-    "975": "Muscle agents",
-    "976": "Dermatological agents",
-    "977": "Other drugs",
-    "978": "Bacterial vaccines",
-    "979": "Other biologicals",
+# ICD-9-CM codes for drug poisoning (used in Italy until ~2017-2019 depending on region)
+ICD9_DRUG_POISONING_CODES = {
+    # 960-979: Poisoning by drugs, medicaments, and biological substances
+    "960": "Poisoning by antibiotics",
+    "961": "Poisoning by other anti-infectives",
+    "962": "Poisoning by hormones and synthetic substitutes",
+    "963": "Poisoning by primarily systemic agents",
+    "964": "Poisoning by agents affecting blood constituents",
+    "965": "Poisoning by analgesics, antipyretics, antirheumatics",
+    "966": "Poisoning by anticonvulsants and anti-Parkinsonism drugs",
+    "967": "Poisoning by sedatives and hypnotics",
+    "968": "Poisoning by other CNS depressants and anesthetics",
+    "969": "Poisoning by psychotropic agents",
+    "970": "Poisoning by CNS stimulants",
+    "971": "Poisoning by drugs affecting autonomic nervous system",
+    "972": "Poisoning by agents affecting cardiovascular system",
+    "973": "Poisoning by agents affecting GI system",
+    "974": "Poisoning by water, mineral, and uric acid metabolism drugs",
+    "975": "Poisoning by agents acting on smooth and skeletal muscles",
+    "976": "Poisoning by agents affecting skin and mucous membrane",
+    "977": "Poisoning by other and unspecified drugs and medicaments",
+    "978": "Poisoning by bacterial vaccines",
+    "979": "Poisoning by other vaccines and biological substances",
 }
 
-# Specific ICD-9 codes of interest
-ICD9_BENZODIAZEPINES = {"9694"}  # 969.4 Benzodiazepine tranquilizers
-ICD9_STIMULANTS = {"9697", "9700", "9701", "9709"}  # Psychostimulants, CNS stimulants
-ICD9_ANTIDEPRESSANTS = {"9690", "9691"}  # Antidepressants
-ICD9_OPIOIDS = {"9650", "9651", "9652", "96500", "96501", "96502", "96509"}  # Opiates
+# ICD-9-CM subgroups mapped to ATC psychotropic groups (N05/N06) plus a
+# single "non_medical" bucket for drugs of abuse. Codes are matched on the
+# cleaned (decimal-stripped) string, so "969.4" -> "9694", "970.81" -> "97081".
+ICD9_BENZODIAZEPINE_CODES = {"9694"}                  # 969.4 benzodiazepines (own class)
+ICD9_ANTIPSYCHOTIC_CODES = {"9691", "9692", "9693"}   # 969.1-.3 neuroleptics -> N05A
+ICD9_ANXIOLYTIC_CODES = {"9695"}                      # 969.5 other tranquilizers -> N05B
+ICD9_HYPNOTIC_SEDATIVE_PREFIX = "967"                 # 967.x sedatives & hypnotics -> N05C
+ICD9_ANTIDEPRESSANT_CODES = {"9690"}                  # 969.0 antidepressants -> N06A
+ICD9_PSYCHOSTIMULANT_CODES = {"9697", "970"}          # 969.7 amphetamines, 970 CNS stim -> N06B
+# Drugs of abuse / non-medical (single undifferentiated bucket):
+#   969.6  psychodysleptics (cannabis, LSD, mescaline)
+#   970.81 cocaine
+#   965.0x opium, heroin, methadone, other opiates  (965.00/.01/.02/.09)
+ICD9_NONMEDICAL_EXACT = {"97081"}                     # 970.81 cocaine
+ICD9_NONMEDICAL_PREFIXES = ("9696", "9650")           # psychodysleptics; 965.0x opioids
 
+
+# ICD-10-CM codes for drug poisoning (T36-T50)
+# These are base codes; actual codes have additional characters for intent and encounter
+ICD10_DRUG_POISONING_RANGES = [
+    ("T36", "T50"),  # Poisoning by drugs, medicaments, biological substances
+]
+
+# ICD-10-CM subgroups mapped to ATC psychotropic groups (N05/N06) plus a
+# single "non_medical" bucket. Matched on the cleaned code prefix.
+ICD10_BENZODIAZEPINE_CODES = {"T424"}                 # T42.4 benzodiazepines (own class)
+ICD10_HYPNOTIC_SEDATIVE_CODES = {"T423", "T426"}      # barbiturates, other sed-hypnotics -> N05C
+ICD10_ANTIDEPRESSANT_CODES = {"T430", "T431", "T432"} # tricyclic/tetracyclic/other -> N06A
+ICD10_ANTIPSYCHOTIC_CODES = {"T433", "T434", "T435"}  # phenothiazine/butyrophenone/other -> N05A
+ICD10_PSYCHOSTIMULANT_CODES = {"T436"}                # T43.6 psychostimulants -> N06B
+# Drugs of abuse / non-medical (single undifferentiated bucket):
+#   T40.x  narcotics & psychodysleptics (opioids, cocaine, cannabis, LSD, ...)
+#   T43.64 MDMA / ecstasy (peeled off the psychostimulant block)
+ICD10_NONMEDICAL_PREFIXES = ("T40", "T4364")
+
+# Intent suffixes in ICD-10-CM T-codes (5th or 6th character position).
+# Recorded for description only. Per study decision, intent does NOT filter
+# cases: all intents (including adverse effects / underdosing) are retained,
+# because intent is often poorly/inconsistently coded in this data.
+ICD10_INTENT_CODES = {
+    "1": "Accidental (unintentional)",
+    "2": "Intentional self-harm",
+    "3": "Assault",
+    "4": "Undetermined",
+    "5": "Adverse effect",
+    "6": "Underdosing",
+}
+
+
+# =============================================================================
+# HELPER FUNCTIONS FOR ICD CODE CLASSIFICATION
+# =============================================================================
 
 def is_drug_intoxication_icd9(code: str) -> bool:
     """
     Check if an ICD-9-CM code represents drug poisoning.
-    
-    Drug poisoning codes are in the 960-979 range.
     
     Parameters
     ----------
@@ -134,7 +203,7 @@ def is_drug_intoxication_icd9(code: str) -> bool:
     Returns
     -------
     bool
-        True if the code falls within the drug poisoning range.
+        True if the code falls within the drug poisoning range (960-979).
         
     Examples
     --------
@@ -142,20 +211,16 @@ def is_drug_intoxication_icd9(code: str) -> bool:
     True
     >>> is_drug_intoxication_icd9("969.4")
     True
-    >>> is_drug_intoxication_icd9("30750")  # Eating disorder
+    >>> is_drug_intoxication_icd9("30750")
     False
     """
-    if not code or not isinstance(code, str):
-        return False
-    
-    # Remove decimal point and whitespace
+    # Remove decimal point and any whitespace
     clean_code = code.replace(".", "").replace(" ", "").upper()
     
-    # Need at least 3 characters
+    # Check if code starts with 96x or 97x (960-979 range)
     if len(clean_code) < 3:
         return False
     
-    # Check if starts with 96x or 97x (960-979 range)
     prefix = clean_code[:3]
     try:
         code_num = int(prefix)
@@ -164,92 +229,37 @@ def is_drug_intoxication_icd9(code: str) -> bool:
         return False
 
 
-def classify_icd9_drug(code: str) -> Dict[str, Any]:
+def is_drug_intoxication_icd10(code: str, include_adverse_effects: bool = True) -> bool:
     """
-    Classify an ICD-9 drug poisoning code into drug categories.
-    
-    Parameters
-    ----------
-    code : str
-        ICD-9-CM diagnosis code.
-        
-    Returns
-    -------
-    dict
-        Dictionary with drug_class, group_name, and other details.
-    """
-    if not is_drug_intoxication_icd9(code):
-        return {"drug_class": None, "group_name": None}
-    
-    clean_code = code.replace(".", "").replace(" ", "")
-    prefix = clean_code[:3]
-    
-    # Check specific drug classes
-    if clean_code.startswith("9694"):
-        return {"drug_class": "benzodiazepine", "group_name": "Psychotropic agents"}
-    elif clean_code.startswith("9650") or clean_code.startswith("9651"):
-        return {"drug_class": "opioid", "group_name": "Analgesics"}
-    elif clean_code.startswith("9697") or clean_code.startswith("970"):
-        return {"drug_class": "stimulant", "group_name": "CNS stimulants"}
-    elif clean_code.startswith("9690"):
-        return {"drug_class": "antidepressant", "group_name": "Psychotropic agents"}
-    elif clean_code.startswith("967"):
-        return {"drug_class": "sedative_hypnotic", "group_name": "Sedatives and hypnotics"}
-    else:
-        return {"drug_class": "other", "group_name": ICD9_DRUG_GROUPS.get(prefix, "Unknown")}
+    Check if an ICD-10-CM code represents drug poisoning (T36-T50).
 
+    All intents are counted as cases (accidental, self-harm, assault,
+    undetermined, adverse effect, underdosing). Intent is recorded elsewhere
+    for description but does not filter cases, because it is often poorly
+    coded in this data.
 
-# =============================================================================
-# ICD-10 CODE CLASSIFICATION
-# =============================================================================
-
-# ICD-10-CM intent codes (5th or 6th character after X)
-ICD10_INTENT_CODES = {
-    "1": "Accidental (unintentional)",
-    "2": "Intentional self-harm",
-    "3": "Assault",
-    "4": "Undetermined",
-    "5": "Adverse effect",      # Usually EXCLUDED from overdose surveillance
-    "6": "Underdosing",         # Usually EXCLUDED from overdose surveillance
-}
-
-# Intents to INCLUDE in surveillance (exclude adverse effects and underdosing)
-SURVEILLANCE_INTENTS = {"1", "2", "3", "4"}
-
-
-def is_drug_intoxication_icd10(code: str, include_adverse_effects: bool = False) -> bool:
-    """
-    Check if an ICD-10-CM code represents drug poisoning.
-    
-    Drug poisoning codes are T36-T50. By default, adverse effects (intent=5)
-    and underdosing (intent=6) are excluded per CDC guidance.
-    
     Parameters
     ----------
     code : str
         ICD-10-CM diagnosis code (e.g., "T424X1A", "T42.4X1A", "T424").
-    include_adverse_effects : bool, default False
-        If True, include codes with intent "5" (adverse effects).
-        
+    include_adverse_effects : bool, default True
+        Retained for backwards compatibility. Intent no longer filters cases,
+        so this parameter has no effect.
+
     Returns
     -------
     bool
-        True if the code represents a drug poisoning to include in surveillance.
-        
+        True if the code falls within the T36-T50 range.
+
     Examples
     --------
     >>> is_drug_intoxication_icd10("T424X1A")  # Benzodiazepine, accidental
     True
-    >>> is_drug_intoxication_icd10("T424X2A")  # Benzodiazepine, self-harm
-    True
     >>> is_drug_intoxication_icd10("T424X5A")  # Benzodiazepine, adverse effect
-    False
-    >>> is_drug_intoxication_icd10("F329")    # Depression code
+    True
+    >>> is_drug_intoxication_icd10("F329")     # Depression code
     False
     """
-    if not code or not isinstance(code, str):
-        return False
-    
     # Clean and uppercase
     clean_code = code.replace(".", "").replace(" ", "").upper()
     
@@ -257,265 +267,428 @@ def is_drug_intoxication_icd10(code: str, include_adverse_effects: bool = False)
     if not clean_code.startswith("T") or len(clean_code) < 3:
         return False
     
-    # Extract the numeric part after T (should be 36-50)
+    # Extract the numeric part after T
     try:
+        # Get the first 2-3 digits after T
         match = re.match(r"T(\d{2,3})", clean_code)
         if not match:
             return False
         code_num = int(match.group(1)[:2])  # Take first 2 digits
         
         # Check if in T36-T50 range
-        if not (36 <= code_num <= 50):
-            return False
-            
+        return 36 <= code_num <= 50
     except (ValueError, AttributeError):
         return False
-    
-    # Check intent if code is long enough
-    # Intent is after the X character (e.g., T424X1A -> intent is "1")
-    if len(clean_code) >= 6:
-        x_pos = clean_code.find("X")
-        if x_pos != -1 and x_pos + 1 < len(clean_code):
-            intent = clean_code[x_pos + 1]
-            if intent in {"5", "6"} and not include_adverse_effects:
-                return False
-    
-    return True
 
 
-def get_icd10_intent(code: str) -> Optional[str]:
+def classify_drug_intoxication(code: str) -> dict[str, str | bool]:
     """
-    Extract the intent from an ICD-10-CM poisoning code.
+    Classify a drug intoxication code into subgroups.
     
     Parameters
     ----------
     code : str
-        ICD-10-CM code (e.g., "T424X2A").
-        
-    Returns
-    -------
-    str or None
-        Intent description, or None if not determinable.
-        
-    Examples
-    --------
-    >>> get_icd10_intent("T424X2A")
-    'Intentional self-harm'
-    >>> get_icd10_intent("T424")
-    None
-    """
-    if not code:
-        return None
-    
-    clean_code = code.replace(".", "").replace(" ", "").upper()
-    x_pos = clean_code.find("X")
-    
-    if x_pos != -1 and x_pos + 1 < len(clean_code):
-        intent_char = clean_code[x_pos + 1]
-        return ICD10_INTENT_CODES.get(intent_char)
-    
-    return None
-
-
-def classify_icd10_drug(code: str) -> Dict[str, Any]:
-    """
-    Classify an ICD-10 drug poisoning code into drug categories.
-    
-    Parameters
-    ----------
-    code : str
-        ICD-10-CM diagnosis code.
+        ICD-9-CM or ICD-10-CM diagnosis code.
         
     Returns
     -------
     dict
-        Dictionary with drug_class, intent, and other details.
-    """
-    if not is_drug_intoxication_icd10(code, include_adverse_effects=True):
-        return {"drug_class": None, "intent": None}
-    
-    clean_code = code.replace(".", "").replace(" ", "").upper()
-    intent = get_icd10_intent(code)
-    
-    # Classify by T-code range
-    # T42.4 = benzodiazepines
-    if clean_code.startswith("T424"):
-        return {"drug_class": "benzodiazepine", "intent": intent}
-    # T42.6 = other antiepileptics and sedative-hypnotics
-    elif clean_code.startswith("T426"):
-        return {"drug_class": "sedative_hypnotic", "intent": intent}
-    # T40 = opioids and other narcotics
-    elif clean_code.startswith("T40"):
-        return {"drug_class": "opioid", "intent": intent}
-    # T43.0-T43.2 = antidepressants
-    elif clean_code.startswith("T430") or clean_code.startswith("T431") or clean_code.startswith("T432"):
-        return {"drug_class": "antidepressant", "intent": intent}
-    # T43.6 = psychostimulants
-    elif clean_code.startswith("T436"):
-        return {"drug_class": "stimulant", "intent": intent}
-    # T43 = other psychotropics
-    elif clean_code.startswith("T43"):
-        return {"drug_class": "other_psychotropic", "intent": intent}
-    else:
-        return {"drug_class": "other", "intent": intent}
-
-
-# =============================================================================
-# UNIFIED CLASSIFICATION FUNCTION
-# =============================================================================
-
-def classify_drug_intoxication(code: str) -> Dict[str, Any]:
-    """
-    Classify any ICD diagnosis code for drug intoxication.
-    
-    Automatically detects whether the code is ICD-9 or ICD-10 and 
-    returns a standardised classification.
-    
-    Parameters
-    ----------
-    code : str
-        Any ICD-9-CM or ICD-10-CM diagnosis code.
-        
-    Returns
-    -------
-    dict
-        Dictionary containing:
+        Dictionary with classification results:
         - is_intoxication: bool
-        - coding_system: 'ICD-9' or 'ICD-10' or None
-        - drug_class: str (benzodiazepine, opioid, stimulant, etc.)
-        - intent: str or None (only for ICD-10)
+        - coding_system: "ICD-9" or "ICD-10" or "unknown"
+        - drug_class: one of "benzodiazepine", "antipsychotic", "anxiolytic",
+          "hypnotic_sedative", "antidepressant", "psychostimulant",
+          "non_medical", "other", or None
+        - intent: intent description or None (ICD-10 only)
         
     Examples
     --------
-    >>> classify_drug_intoxication("9694")
-    {'is_intoxication': True, 'coding_system': 'ICD-9', 
-     'drug_class': 'benzodiazepine', 'intent': None}
-    >>> classify_drug_intoxication("T424X2A")
-    {'is_intoxication': True, 'coding_system': 'ICD-10',
-     'drug_class': 'benzodiazepine', 'intent': 'Intentional self-harm'}
-    >>> classify_drug_intoxication("30750")
-    {'is_intoxication': False, 'coding_system': None,
-     'drug_class': None, 'intent': None}
+    >>> classify_drug_intoxication("T424X2A") == {
+    ...     'is_intoxication': True, 'coding_system': 'ICD-10',
+    ...     'drug_class': 'benzodiazepine', 'intent': 'Intentional self-harm'}
+    True
+    >>> classify_drug_intoxication("9691")["drug_class"]  # phenothiazine
+    'antipsychotic'
     """
-    if not code or not isinstance(code, str):
-        return {
-            "is_intoxication": False,
-            "coding_system": None,
-            "drug_class": None,
-            "intent": None,
-        }
-    
     clean_code = code.replace(".", "").replace(" ", "").upper()
     
-    # Check if it's ICD-10 (starts with T)
-    if clean_code.startswith("T"):
-        if is_drug_intoxication_icd10(code):
-            classification = classify_icd10_drug(code)
-            return {
-                "is_intoxication": True,
-                "coding_system": "ICD-10",
-                "drug_class": classification["drug_class"],
-                "intent": classification["intent"],
-            }
-        else:
-            # It's a T-code but not a drug intoxication (e.g., T-code outside 36-50)
-            return {
-                "is_intoxication": False,
-                "coding_system": "ICD-10",
-                "drug_class": None,
-                "intent": None,
-            }
-    
-    # Check if it's ICD-9 drug poisoning
-    if is_drug_intoxication_icd9(code):
-        classification = classify_icd9_drug(code)
-        return {
-            "is_intoxication": True,
-            "coding_system": "ICD-9",
-            "drug_class": classification["drug_class"],
-            "intent": None,  # ICD-9 doesn't encode intent in the code itself
-        }
-    
-    # Not a drug intoxication code
-    return {
+    result = {
         "is_intoxication": False,
-        "coding_system": None,
+        "coding_system": "unknown",
         "drug_class": None,
         "intent": None,
     }
+    
+    # Empty / missing code: nothing to classify (prevents IndexError below)
+    if not clean_code:
+        return result
+    
+    # Check ICD-10-CM first (starts with T)
+    if clean_code.startswith("T"):
+        result["coding_system"] = "ICD-10"
+        
+        if is_drug_intoxication_icd10(code):
+            result["is_intoxication"] = True
+            
+            # Classify drug class (most specific buckets first).
+            # non_medical (T40 narcotics/psychodysleptics + T43.64 MDMA) wins
+            # over the psychostimulant block so MDMA lands in non_medical.
+            if clean_code.startswith(ICD10_NONMEDICAL_PREFIXES):
+                result["drug_class"] = "non_medical"
+            elif clean_code[:4] in ICD10_BENZODIAZEPINE_CODES:
+                result["drug_class"] = "benzodiazepine"
+            elif clean_code[:4] in ICD10_HYPNOTIC_SEDATIVE_CODES:
+                result["drug_class"] = "hypnotic_sedative"
+            elif clean_code[:4] in ICD10_ANTIPSYCHOTIC_CODES:
+                result["drug_class"] = "antipsychotic"
+            elif clean_code[:4] in ICD10_ANTIDEPRESSANT_CODES:
+                result["drug_class"] = "antidepressant"
+            elif clean_code[:4] in ICD10_PSYCHOSTIMULANT_CODES:
+                result["drug_class"] = "psychostimulant"
+            else:
+                result["drug_class"] = "other"
+            
+            # Extract intent (recorded for description only)
+            x_pos = clean_code.find("X")
+            if x_pos != -1 and x_pos + 1 < len(clean_code):
+                intent_code = clean_code[x_pos + 1]
+                result["intent"] = ICD10_INTENT_CODES.get(intent_code, "unknown")
+    
+    # Check ICD-9-CM (numeric codes starting with 96x or 97x)
+    elif clean_code[0].isdigit():
+        result["coding_system"] = "ICD-9"
+        
+        if is_drug_intoxication_icd9(code):
+            result["is_intoxication"] = True
+            
+            # Classify drug class (most specific buckets first).
+            # non_medical is checked before the 970 psychostimulant block so
+            # that cocaine (970.81) is not swept up as a stimulant.
+            if clean_code in ICD9_NONMEDICAL_EXACT or clean_code.startswith(ICD9_NONMEDICAL_PREFIXES):
+                result["drug_class"] = "non_medical"
+            elif clean_code.startswith("9694"):
+                result["drug_class"] = "benzodiazepine"
+            elif clean_code.startswith(("9691", "9692", "9693")):
+                result["drug_class"] = "antipsychotic"
+            elif clean_code.startswith("9695"):
+                result["drug_class"] = "anxiolytic"
+            elif clean_code.startswith(ICD9_HYPNOTIC_SEDATIVE_PREFIX):
+                result["drug_class"] = "hypnotic_sedative"
+            elif clean_code.startswith("9690"):
+                result["drug_class"] = "antidepressant"
+            elif clean_code.startswith("9697") or clean_code.startswith("970"):
+                result["drug_class"] = "psychostimulant"
+            else:
+                result["drug_class"] = "other"
+            
+            # ICD-9-CM intent is in external cause codes (E codes), not in the diagnosis
+            result["intent"] = "requires E-code lookup"
+    
+    return result
 
 
 # =============================================================================
-# COLUMN NAME UTILITIES
+# PANDERA SCHEMA FOR ED DATA VALIDATION
 # =============================================================================
 
-# Mapping from Italian VDI column names to standardised English names
-ED_COLUMN_MAPPING = {
-    "Codice Fiscale Assistito MICROBIO": "patient_id",
-    "Annomese_INGR": "year_month",
-    "Eta(calcolata)": "age_years",
-    "Eta (flusso)": "age_flow",  # Don't use - encoding unclear (e.g., "2856" for 16yo)
-    "Sesso (anag ass.to)": "sex_registry",
-    "Sesso (flusso)": "sex_flow",
-    "Cod Diagnosi": "diagnosis_code_primary",
-    "Diagnosi": "diagnosis_desc_primary",
-    "Cod Diagnosi Secondaria": "diagnosis_code_secondary",
-    "Diagnosi Secondaria": "diagnosis_desc_secondary",
-    "Codice Esito": "disposition_code",
-    "Descrizione Esito": "disposition_desc",
-    "Codice Nazione(flusso)": "nationality_code",
-    "Conteggio Persone fisiche": "count",
+class EDPresentationSchema(pa.DataFrameModel):
+    """
+    Pandera schema for validating Lombardy ED presentation data.
+    
+    This schema reflects the actual data structure from the regional
+    syndromic surveillance system. Use this to validate data extracts
+    before analysis to catch data quality issues early.
+    
+    Example
+    -------
+    >>> import pandas as pd
+    >>> from intox_analysis.data.schemas import EDPresentationSchema
+    >>> df = pd.read_csv("ed_data.csv")                   # doctest: +SKIP
+    >>> validated_df = EDPresentationSchema.validate(df)  # doctest: +SKIP
+    """
+    
+    # Pseudonymised patient identifier (SHA-256 hash with MB- prefix)
+    codice_fiscale_assistito_microbio: Series[str] = pa.Field(
+        nullable=False,
+        str_matches=r"^MB-[A-F0-9]{64}$",
+        description="Pseudonymised patient identifier using PPRL hash"
+    )
+    
+    # Year-month of ED presentation in YYYYMM format
+    annomese_ingr: Series[str] = pa.Field(
+        nullable=False,
+        str_matches=r"^(201[7-9]|202[0-5])(0[1-9]|1[0-2])$",
+        description="Year-month of ED presentation (YYYYMM format)"
+    )
+    
+    # Age (calculated) - should be reasonable range
+    eta_calcolata: Series[int] = pa.Field(
+        ge=0, le=120,
+        nullable=True,
+        description="Patient age in years, calculated from DOB"
+    )
+    
+    # Age from flow (may have different encoding)
+    # NOTE: Observed value "2856" for a 16-year-old patient. This is NOT age in years.
+    # Possible encodings: days of life, categorical band code, or other regional scheme.
+    # Use eta_calcolata as the primary age variable; eta_flusso for quality checks only.
+    eta_flusso: Series[str] = pa.Field(
+        nullable=True,
+        description="Age encoding from administrative flow (NOT years; use eta_calcolata instead)"
+    )
+    
+    # Sex from patient registry
+    sesso_anag_ass_to: Series[str] = pa.Field(
+        isin=["F", "M", "U"],
+        nullable=True,
+        description="Sex from patient registry"
+    )
+    
+    # Sex from administrative flow
+    sesso_flusso: Series[str] = pa.Field(
+        isin=["F", "M", "U"],
+        nullable=True,
+        description="Sex from administrative flow"
+    )
+    
+    # Primary diagnosis code
+    cod_diagnosi: Series[str] = pa.Field(
+        nullable=True,
+        description="Primary diagnosis code (ICD-9-CM or ICD-10-CM)"
+    )
+    
+    # Primary diagnosis description
+    diagnosi: Series[str] = pa.Field(
+        nullable=True,
+        description="Primary diagnosis text description"
+    )
+    
+    # Secondary diagnosis code
+    cod_diagnosi_secondaria: Series[str] = pa.Field(
+        nullable=True,
+        description="Secondary diagnosis code"
+    )
+    
+    # Secondary diagnosis description  
+    diagnosi_secondaria: Series[str] = pa.Field(
+        nullable=True,
+        description="Secondary diagnosis text description"
+    )
+    
+    # ED disposition code
+    codice_esito: Series[str] = pa.Field(
+        nullable=True,
+        description="ED disposition/outcome code"
+    )
+    
+    # ED disposition description
+    descrizione_esito: Series[str] = pa.Field(
+        nullable=True,
+        description="ED disposition/outcome description"
+    )
+    
+    # Nationality code
+    codice_nazione_flusso: Series[str] = pa.Field(
+        nullable=True,
+        description="Nationality code from administrative flow"
+    )
+    
+    # Count of unique individuals (should be 1 for event-level data)
+    conteggio_persone_fisiche: Series[int] = pa.Field(
+        ge=1,
+        nullable=False,
+        description="Count of unique individuals (typically 1)"
+    )
+    
+    class Config:
+        """Pandera schema configuration."""
+        name = "EDPresentationSchema"
+        strict = False  # Allow additional columns
+        coerce = True   # Attempt type coercion
+
+
+# Relaxed schema for initial data exploration (fewer constraints)
+class EDPresentationSchemaRelaxed(pa.DataFrameModel):
+    """
+    Relaxed schema for initial data exploration.
+    
+    Use this when first loading data to identify quality issues
+    without strict validation failures.
+    """
+    codice_fiscale_assistito_microbio: Series[str] = pa.Field(nullable=False)
+    annomese_ingr: Series[str] = pa.Field(nullable=False)
+    eta_calcolata: Series[object] = pa.Field(nullable=True)  # Allow any type initially
+    cod_diagnosi: Series[str] = pa.Field(nullable=True)
+    codice_esito: Series[str] = pa.Field(nullable=True)
+    conteggio_persone_fisiche: Series[object] = pa.Field(nullable=True)
+    
+    class Config:
+        strict = False
+        coerce = False
+
+
+# =============================================================================
+# PYDANTIC MODEL FOR INDIVIDUAL RECORDS
+# =============================================================================
+
+class EDPresentation(BaseModel):
+    """
+    Pydantic model for a single ED presentation record.
+    
+    Use this for type-safe handling of individual records,
+    API responses, or when working with records one at a time.
+    
+    Example
+    -------
+    >>> record = EDPresentation(
+    ...     codice_fiscale_assistito_microbio="MB-0643EBF4C0B837E4F239756CA2C1F5C80D67FF1E0A79413D13954A56F7F03E97",
+    ...     annomese_ingr="201907",
+    ...     eta_calcolata=16,
+    ...     sesso="F",
+    ...     cod_diagnosi="30750",
+    ...     codice_esito="1",
+    ... )
+    >>> record.is_drug_intoxication
+    False
+    """
+    
+    codice_fiscale_assistito_microbio: str = Field(
+        ..., 
+        pattern=r"^MB-[A-F0-9]{64}$",
+        description="Pseudonymised patient identifier"
+    )
+    annomese_ingr: str = Field(
+        ...,
+        pattern=r"^\d{6}$",
+        description="Year-month of presentation (YYYYMM)"
+    )
+    eta_calcolata: int | None = Field(
+        default=None,
+        ge=0, le=120,
+        description="Age in years"
+    )
+    sesso: Literal["F", "M", "U"] | None = Field(
+        default=None,
+        description="Sex (F=female, M=male, U=unknown)"
+    )
+    cod_diagnosi: str | None = Field(
+        default=None,
+        description="Primary diagnosis code"
+    )
+    diagnosi: str | None = Field(
+        default=None,
+        description="Primary diagnosis description"
+    )
+    cod_diagnosi_secondaria: str | None = Field(
+        default=None,
+        description="Secondary diagnosis code"
+    )
+    codice_esito: str | None = Field(
+        default=None,
+        description="ED disposition code"
+    )
+    conteggio_persone_fisiche: int = Field(
+        default=1,
+        ge=1,
+        description="Count of individuals"
+    )
+    
+    @property
+    def year_month(self) -> tuple[int, int]:
+        """Extract year and month as integers."""
+        return int(self.annomese_ingr[:4]), int(self.annomese_ingr[4:6])
+    
+    @property
+    def is_drug_intoxication(self) -> bool:
+        """Check if this presentation is a drug intoxication case."""
+        for code in [self.cod_diagnosi, self.cod_diagnosi_secondaria]:
+            if code and (is_drug_intoxication_icd9(code) or is_drug_intoxication_icd10(code)):
+                return True
+        return False
+    
+    @property
+    def is_admitted(self) -> bool:
+        """Check if patient was admitted to hospital."""
+        return self.codice_esito in ADMISSION_ESITO_CODES
+    
+    @property
+    def drug_classification(self) -> dict[str, str | bool] | None:
+        """Get drug classification for intoxication cases."""
+        for code in [self.cod_diagnosi, self.cod_diagnosi_secondaria]:
+            if code:
+                classification = classify_drug_intoxication(code)
+                if classification["is_intoxication"]:
+                    return classification
+        return None
+    
+    @field_validator("annomese_ingr")
+    @classmethod
+    def validate_date_range(cls, v: str) -> str:
+        """Validate that date is within study period (2017-2025)."""
+        year = int(v[:4])
+        month = int(v[4:6])
+        if year < 2017 or year > 2025:
+            raise ValueError(f"Year {year} outside study period 2017-2025")
+        if month < 1 or month > 12:
+            raise ValueError(f"Invalid month {month}")
+        return v
+
+
+# =============================================================================
+# COLUMN NAME MAPPINGS
+# =============================================================================
+
+# Mapping from Italian column names to standardised English names
+COLUMN_NAME_MAPPING = {
+    "Codice Fiscale Assistito MICROBIO": "codice_fiscale_assistito_microbio",
+    "Annomese_INGR": "annomese_ingr",
+    "Eta(calcolata)": "eta_calcolata",
+    "Eta (flusso)": "eta_flusso",
+    "Sesso (anag ass.to)": "sesso_anag_ass_to",
+    "Sesso (flusso)": "sesso_flusso",
+    "Cod Diagnosi": "cod_diagnosi",
+    "Diagnosi": "diagnosi",
+    "Cod Diagnosi Secondaria": "cod_diagnosi_secondaria",
+    "Diagnosi Secondaria": "diagnosi_secondaria",
+    "Codice Esito": "codice_esito",
+    "Descrizione Esito": "descrizione_esito",
+    "Codice Nazione(flusso)": "codice_nazione_flusso",
+    "Conteggio Persone fisiche": "conteggio_persone_fisiche",
 }
 
+# Reverse mapping for converting back to Italian names
+COLUMN_NAME_MAPPING_REVERSE = {v: k for k, v in COLUMN_NAME_MAPPING.items()}
 
-def standardise_column_names(df, column_mapping: Optional[Dict[str, str]] = None):
+
+def standardise_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Rename DataFrame columns from Italian VDI names to English.
-    
-    Works with both pandas and polars DataFrames.
+    Convert Italian column names to standardised lowercase snake_case.
     
     Parameters
     ----------
-    df : DataFrame
-        pandas or polars DataFrame with Italian column names.
-    column_mapping : dict, optional
-        Custom mapping dict. If None, uses ED_COLUMN_MAPPING.
+    df : pd.DataFrame
+        DataFrame with original Italian column names.
         
     Returns
     -------
-    DataFrame
-        DataFrame with renamed columns.
+    pd.DataFrame
+        DataFrame with standardised column names.
     """
-    if column_mapping is None:
-        column_mapping = ED_COLUMN_MAPPING
-    
-    # Works for both pandas and polars
-    return df.rename(columns=column_mapping) if hasattr(df, 'rename') else df.rename(column_mapping)
+    return df.rename(columns=COLUMN_NAME_MAPPING)
 
 
-# =============================================================================
-# QUICK TEST
-# =============================================================================
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("ICD Code Classification Tests")
-    print("=" * 60)
+def restore_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert standardised column names back to original Italian names.
     
-    test_codes = [
-        ("9694", "ICD-9 Benzodiazepine"),
-        ("969.4", "ICD-9 Benzodiazepine with decimal"),
-        ("30750", "ICD-9 Eating disorder (not intox)"),
-        ("T424X1A", "ICD-10 Benzodiazepine, accidental"),
-        ("T424X2A", "ICD-10 Benzodiazepine, self-harm"),
-        ("T424X5A", "ICD-10 Benzodiazepine, adverse effect"),
-        ("T400X1A", "ICD-10 Opioid, accidental"),
-        ("F329", "ICD-10 Depression (not intox)"),
-    ]
-    
-    for code, description in test_codes:
-        result = classify_drug_intoxication(code)
-        status = "✓ INTOX" if result["is_intoxication"] else "✗ Not intox"
-        print(f"\n{code} ({description})")
-        print(f"  {status}")
-        print(f"  System: {result['coding_system']}, Class: {result['drug_class']}, Intent: {result['intent']}")
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with standardised column names.
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with original Italian column names.
+    """
+    return df.rename(columns=COLUMN_NAME_MAPPING_REVERSE)

@@ -484,11 +484,11 @@ if USE_SYNTHETIC:
     from config import STUDY_YEARS
     
     # Generate pharma data
-    pharma_df = generate_pharma_data(n_records=100000, years=STUDY_YEARS)
+    pharma_df = generate_pharma_data(n_records=100000)
     print(f"Generated {len(pharma_df):,} synthetic prescription records")
     
     # Generate ED data
-    ed_df = generate_ed_data(n_records=50000, years=STUDY_YEARS)
+    ed_df = generate_ed_data(n_records=50000)
     
     # Filter to intoxications only and add required columns
     from intox_analysis.data.schemas import classify_drug_intoxication

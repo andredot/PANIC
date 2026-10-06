@@ -1,367 +1,353 @@
-# -*- coding: utf-8 -*-
 """
-Synthetic Data Generators (Fast Vectorized Version)
-====================================================
+Synthetic data generators for the Lombardy drug-intoxication project.
 
-Generates realistic synthetic data for testing the analysis pipeline.
-Uses vectorized numpy operations for speed.
+Produces test data that mirrors the real VDI extracts WITHOUT any real patient
+information, so the analysis pipeline can be developed outside the secure VDI.
+
+Two flows are generated, with the exact column headers seen in the real files:
+
+ED ("ed_presentations.csv"):
+    Codice Fiscale Assistito MICROBIO, Annomese_INGR, Eta(calcolata),
+    Sesso (anag ass.to), Sesso (flusso), Cod Diagnosi, Diagnosi,
+    Cod Diagnosi Secondaria, Diagnosi Secondaria, Codice Esito,
+    Descrizione Esito, Codice Nazione(flusso), Conteggio Persone fisiche,
+    facility_id, residence
+
+Pharma / FUR ("pharma_synthetic.csv"):
+    Codice Fiscale Assistito MICROBIO, Eta Anni, Sesso,
+    Data Prescrizione.Data, Data Erogazione.Data, Cod Atc, Desc Atc,
+    Cod Tipo Medico, Desc Tipo Medico, DDD
+
+Drug-intoxication diagnosis codes follow the ATC-aligned taxonomy in schemas.py
+(benzodiazepine, antipsychotic, anxiolytic, hypnotic_sedative, antidepressant,
+psychostimulant, non_medical, other). Every intoxication code emitted here
+classifies back to its intended class (see tests/test_generators.py).
+
+NOTE on DDD: the real FUR column name is not yet confirmed. This generator emits
+it as "DDD"; set DDD_COLUMN once the real name is known and the loader/config can
+point at it.
 """
+
+from __future__ import annotations
+
+import hashlib
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import Dict, Optional, Tuple
-
 
 # =============================================================================
-# CONSTANTS
+# STUDY CONSTANTS
 # =============================================================================
 
-URBAN_COMUNI = [
-    "Milano", "Bergamo", "Brescia", "Monza", "Como", "Varese", "Pavia",
-    "Cremona", "Lecco", "Lodi", "Mantova", "Busto Arsizio", "Sesto San Giovanni",
+STUDY_START_YEAR = 2017
+STUDY_END_YEAR = 2025
+COVID_START_YEARMONTH = "202003"
+
+# Real FUR DDD column name (placeholder until confirmed from the VDI codebook).
+DDD_COLUMN = "DDD"
+
+FEMALE_PROPORTION = 0.55
+AGE_COMPONENTS = [  # mixture of normals (mean, std, weight)
+    (16, 2, 0.10), (25, 8, 0.35), (45, 12, 0.30), (65, 15, 0.25),
 ]
 
-RURAL_COMUNI = [
-    "Morbegno", "Chiavenna", "Bormio", "Livigno", "Tirano", "Edolo",
-    "Ponte di Legno", "Aprica", "Madesimo", "Foppolo", "Branzi",
+SEASONAL_PATTERN = {1: 1.05, 2: 0.95, 3: 1.0, 4: 0.98, 5: 1.02, 6: 1.05,
+                    7: 1.08, 8: 1.10, 9: 1.0, 10: 0.98, 11: 0.95, 12: 1.05}
+COVID_IMMEDIATE_EFFECT = -0.15
+COVID_TREND_CHANGE = 0.01
+
+# Drug-class mix for intoxication cases (benzodiazepine predominance retained).
+DRUG_CLASS_DISTRIBUTION = {
+    "benzodiazepine": 0.34, "antidepressant": 0.18, "antipsychotic": 0.12,
+    "hypnotic_sedative": 0.08, "psychostimulant": 0.07, "non_medical": 0.09,
+    "anxiolytic": 0.04, "other": 0.08,
+}
+
+# ICD-10-CM codes (full 7-char form), verified to round-trip through the
+# classifier. No "anxiolytic" key: ICD-10 has no clean anxiolytic-only code,
+# so post-transition anxiolytic cases fall back to the benzodiazepine bucket.
+ICD10_CODES_BY_CLASS = {
+    "benzodiazepine":   ["T424X1A", "T424X2A", "T424X4A"],
+    "antipsychotic":    ["T433X1A", "T433X2A", "T434X1A", "T435X1A"],
+    "hypnotic_sedative": ["T423X1A", "T426X1A", "T426X2A"],
+    "antidepressant":   ["T430X1A", "T431X1A", "T432X1A", "T432X2A"],
+    "psychostimulant":  ["T436X1A", "T43621A", "T43631A"],
+    "non_medical":      ["T400X1A", "T400X2A", "T401X1A", "T405X1A", "T407X1A", "T43641A"],
+    "other":            ["T509X1A", "T460X1A", "T392X1A"],
+}
+ICD9_CODES_BY_CLASS = {
+    "benzodiazepine":   ["9694"],
+    "antipsychotic":    ["9691", "9692", "9693"],
+    "anxiolytic":       ["9695"],
+    "hypnotic_sedative": ["9670", "9671", "9678"],
+    "antidepressant":   ["9690"],
+    "psychostimulant":  ["9697", "9700", "97089"],
+    "non_medical":      ["9696", "97081", "96500", "96501", "96502", "96509"],
+    "other":            ["9654", "9720", "9620"],
+}
+ALL_INTOX_CODES = {c for codes in ICD10_CODES_BY_CLASS.values() for c in codes} | \
+                  {c for codes in ICD9_CODES_BY_CLASS.values() for c in codes}
+
+NON_INTOX_ICD10 = ["J189", "R104", "N390", "I10", "S0100", "F410", "F320", "F200", "R51"]
+NON_INTOX_ICD9 = ["4659", "7890", "7840", "4019", "78900"]
+
+# Esito: only 1 and 2 are confirmed from real data; 4/5/6 weights are placeholders.
+ESITO_DISTRIBUTION = {"1": 0.70, "2": 0.16, "4": 0.03, "5": 0.08, "6": 0.03}
+ESITO_DESCRIPTIONS = {
+    "1": "DIMISSIONE A DOMICILIO", "2": "RICOVERO ORDINARIO",
+    "4": "RICOVERO IN TERAPIA INTENSIVA", "5": "TRASFERIMENTO AD ALTRO ISTITUTO",
+    "6": "DECEDUTO IN PRONTO SOCCORSO",
+}
+
+FACILITIES = ["OSP_MI_HUMANITAS", "OSP_PV_SAN_MATTEO", "OSP_CO_SANT_ANNA",
+              "OSP_MI_SACCO", "OSP_MI_NIGUARDA", "OSP_BS_CIVILI",
+              "OSP_BG_PAPA_GIOVANNI", "OSP_MI_POLICLINICO", "OSP_VA_CIRCOLO"]
+COMUNI = ["Milano", "Bergamo", "Brescia", "Como", "Mantova", "Pavia", "Varese",
+          "Lecco", "Cremona", "Monza", "Sesto San Giovanni", "Busto Arsizio",
+          "Lodi", "Sondrio", "Edolo", "Ponte di Legno", "Foppolo", "Branzi"]
+
+# ATC vocabulary for the pharma flow (N05/N06), weighted toward the
+# linkage-relevant groups. (atc, name, weight)
+ATC_DRUGS = [
+    ("N05BA01", "DIAZEPAM", 6), ("N05BA06", "LORAZEPAM", 6),
+    ("N05BA12", "ALPRAZOLAM", 7), ("N05BA08", "BROMAZEPAM", 4),
+    ("N05CD02", "NITRAZEPAM", 2), ("N05CF02", "ZOPICLONE", 3),
+    ("N05AH03", "OLANZAPINA", 4), ("N05AH04", "QUETIAPINA", 5),
+    ("N05AX12", "ARIPIPRAZOLO", 3), ("N05AX08", "RISPERIDONE", 3),
+    ("N06AB06", "SERTRALINA", 7), ("N06AB10", "ESCITALOPRAM", 6),
+    ("N06AB05", "PAROXETINA", 4), ("N06AX05", "TRAZODONE", 4),
+    ("N06AX16", "VENLAFAXINA", 4), ("N06AB03", "FLUOXETINA", 4),
+    ("N06BA04", "METILFENIDATO", 2), ("N06DA03", "RIVASTIGMINA", 2),
+    ("N06DX01", "MEMANTINA", 2),
 ]
-
-ED_FACILITIES = [
-    "OSP_MI_NIGUARDA", "OSP_MI_POLICLINICO", "OSP_MI_SACCO",
-    "OSP_MI_HUMANITAS", "OSP_BG_PAPA_GIOVANNI", "OSP_BS_CIVILI",
-    "OSP_CO_SANT_ANNA", "OSP_VA_CIRCOLO", "OSP_PV_SAN_MATTEO",
-]
-
-# Diagnosis codes
-INTOX_CODES_ICD10 = ["T424X1A", "T424X2A", "T400X1A", "T400X2A", "T391X1A", 
-                     "T391X2A", "T436X1A", "T436X2A", "T430X2A", "T426X1A"]
-INTOX_CODES_ICD9 = ["9694", "96940", "9650", "96500", "9697", "9690"]
-MH_CODES = ["F320", "F329", "F410", "F411", "F431", "F500", "F200"]
-OTHER_CODES = ["J189", "K529", "R104", "S0100", "I10", "N390"]
-
-ATC_CODES_BENZO = ["N05BA12", "N05BA06", "N05BA01", "N05BA04"]
-ATC_CODES_OTHER = ["N05CF01", "N05CF02", "N06AB06", "N06AB10", "N02AX02", "A02BC01"]
+PRESCRIBER_TYPES = [(" -", "NON APPLICABILE", 0.55), ("?", "DATO MANCANTE", 0.30),
+                    ("1", "MEDICO DI MEDICINA GENERALE", 0.15)]
 
 
 # =============================================================================
-# FAST GENERATORS
+# HELPERS
 # =============================================================================
 
-def generate_patient_ids(n: int, seed: int = 42) -> np.ndarray:
-    """Generate n unique patient IDs quickly."""
-    np.random.seed(seed)
-    hex_chars = np.array(list("0123456789ABCDEF"))
-    # Generate all random hex characters at once
-    random_hex = np.random.choice(hex_chars, size=(n, 64))
-    # Join each row into a string
-    ids = np.array(["MB-" + "".join(row) for row in random_hex])
-    return ids
+def generate_pseudonymised_id(seed: int | str) -> str:
+    """Deterministic MB-{64 hex} pseudonymised identifier."""
+    return "MB-" + hashlib.sha256(str(seed).encode("utf-8")).hexdigest().upper()
 
 
-def generate_ed_presentations(
+def generate_yearmonth_range(start_year=STUDY_START_YEAR, end_year=STUDY_END_YEAR):
+    """List of YYYYMM strings spanning the study period."""
+    return [f"{y}{m:02d}" for y in range(start_year, end_year + 1) for m in range(1, 13)]
+
+
+def _sample_ages(rng, n):
+    means, stds, weights = zip(*AGE_COMPONENTS)
+    comp = rng.choice(len(AGE_COMPONENTS), size=n, p=np.array(weights) / sum(weights))
+    ages = rng.normal(np.array(means)[comp], np.array(stds)[comp])
+    return np.clip(ages, 0, 105).astype(int)
+
+
+def _expected_count(ym, baseline, trend, include_covid=True):
+    year, month = int(ym[:4]), int(ym[4:6])
+    months = (year - STUDY_START_YEAR) * 12 + (month - 1)
+    val = baseline * (1 + trend) ** months * SEASONAL_PATTERN.get(month, 1.0)
+    if include_covid and ym >= COVID_START_YEARMONTH:
+        cy, cm = int(COVID_START_YEARMONTH[:4]), int(COVID_START_YEARMONTH[4:6])
+        msc = (year - cy) * 12 + (month - cm)
+        val *= (1 + COVID_IMMEDIATE_EFFECT) * (1 + COVID_TREND_CHANGE) ** msc
+    return max(val, 0.0)
+
+
+def _sampled_yearmonths(rng, n, trend, include_covid):
+    yms = generate_yearmonth_range()
+    probs = np.array([_expected_count(ym, 1.0, trend, include_covid) for ym in yms])
+    probs = probs / probs.sum()
+    return rng.choice(yms, size=n, p=probs)
+
+
+# =============================================================================
+# ED GENERATOR
+# =============================================================================
+
+def generate_ed_data(
     n_records: int = 50000,
-    start_year: int = 2017,
-    end_year: int = 2025,
+    intoxication_rate: float = 0.04,
     seed: int = 42,
+    icd10_transition_yearmonth: str = "201901",
+    patient_ids: list[str] | None = None,
+    include_covid_effect: bool = True,
 ) -> pd.DataFrame:
     """
-    Generate synthetic ED presentation data (FAST version).
+    Generate synthetic ED presentations with the real Lombardy column headers.
+
+    Intoxication codes follow the new taxonomy; an ICD-9->ICD-10 transition lets
+    the data exercise both code systems (real extracts appear ICD-10 throughout,
+    so set icd10_transition_yearmonth to the study start to disable ICD-9).
     """
-    np.random.seed(seed)
-    print(f"  Generating {n_records:,} ED records...", end=" ", flush=True)
-    
-    # Patient IDs (70% unique)
-    n_unique = int(n_records * 0.7)
-    patient_pool = generate_patient_ids(n_unique, seed)
-    patient_ids = np.random.choice(patient_pool, n_records)
-    
-    # Years and months
-    years = np.random.choice(range(start_year, end_year + 1), n_records)
-    months = np.random.randint(1, 13, n_records)
-    year_months = [f"{y}{m:02d}" for y, m in zip(years, months)]
-    
-    # Age (bimodal)
-    ages = np.where(
-        np.random.random(n_records) < 0.4,
-        np.random.normal(25, 8, n_records),
-        np.random.normal(55, 15, n_records)
-    ).astype(int).clip(5, 99)
-    
-    # Sex
-    sex = np.random.choice(["F", "M"], n_records, p=[0.55, 0.45])
-    
-    # Residence
-    all_comuni = URBAN_COMUNI + RURAL_COMUNI
-    urban_prob = 0.7 / len(URBAN_COMUNI)
-    rural_prob = 0.3 / len(RURAL_COMUNI)
-    probs = [urban_prob] * len(URBAN_COMUNI) + [rural_prob] * len(RURAL_COMUNI)
-    residence = np.random.choice(all_comuni, n_records, p=probs)
-    
-    # Facility
-    facility = np.random.choice(ED_FACILITIES, n_records)
-    
-    # Diagnosis type probabilities (intox increases over time)
-    intox_probs = 0.05 + 0.08 * (years - start_year) / (end_year - start_year)
-    mh_probs = np.full(n_records, 0.12)
-    
-    rolls = np.random.random(n_records)
-    
-    # Vectorized diagnosis assignment
-    is_intox = rolls < intox_probs
-    is_mh = (rolls >= intox_probs) & (rolls < intox_probs + mh_probs)
-    is_other = ~is_intox & ~is_mh
-    
-    # Generate diagnosis codes
-    diagnoses = np.empty(n_records, dtype=object)
-    
-    # ICD-10 for recent years, ICD-9 for older
-    use_icd10 = years >= 2019
-    
-    # Intoxication codes
-    intox_icd10 = np.random.choice(INTOX_CODES_ICD10, n_records)
-    intox_icd9 = np.random.choice(INTOX_CODES_ICD9, n_records)
-    diagnoses[is_intox & use_icd10] = intox_icd10[is_intox & use_icd10]
-    diagnoses[is_intox & ~use_icd10] = intox_icd9[is_intox & ~use_icd10]
-    
-    # Mental health codes
-    mh_codes = np.random.choice(MH_CODES, n_records)
-    diagnoses[is_mh] = mh_codes[is_mh]
-    
-    # Other codes
-    other_codes = np.random.choice(OTHER_CODES, n_records)
-    diagnoses[is_other] = other_codes[is_other]
-    
-    # Secondary diagnosis
-    has_secondary = np.random.random(n_records) < 0.3
-    secondary = np.where(has_secondary, np.random.choice(MH_CODES, n_records), "_")
-    
-    # Esito (higher admission for intox)
-    esito = np.empty(n_records, dtype=object)
-    esito[is_intox] = np.random.choice(["1", "2", "3", "4"], is_intox.sum(), p=[0.65, 0.25, 0.07, 0.03])
-    esito[~is_intox] = np.random.choice(["1", "2", "3"], (~is_intox).sum(), p=[0.80, 0.15, 0.05])
-    
-    esito_desc_map = {"1": "DIMISSIONE A DOMICILIO", "2": "RICOVERO ORDINARIO", 
-                      "3": "RICOVERO DH", "4": "RICOVERO TERAPIA INTENSIVA"}
-    esito_desc = np.array([esito_desc_map.get(e, "ALTRO") for e in esito])
-    
-    print("Done!")
-    
+    rng = np.random.default_rng(seed)
+    yms = _sampled_yearmonths(rng, n_records, trend=0.006, include_covid=include_covid_effect)
+    ages = _sample_ages(rng, n_records)
+    sexes = np.where(rng.random(n_records) < FEMALE_PROPORTION, "F", "M")
+
+    if patient_ids is None:
+        patient_ids = [generate_pseudonymised_id(f"{seed}-ED-{i}") for i in range(n_records)]
+    else:
+        patient_ids = list(rng.choice(patient_ids, size=n_records))
+
+    is_intox = rng.random(n_records) < intoxication_rate
+    class_names = list(DRUG_CLASS_DISTRIBUTION)
+    class_probs = np.array(list(DRUG_CLASS_DISTRIBUTION.values()))
+    class_probs = class_probs / class_probs.sum()
+
+    cod, cod2, desc2 = [], [], []
+    for i in range(n_records):
+        icd10 = yms[i] >= icd10_transition_yearmonth
+        if is_intox[i]:
+            cls = rng.choice(class_names, p=class_probs)
+            table = ICD10_CODES_BY_CLASS if icd10 else ICD9_CODES_BY_CLASS
+            if cls not in table:           # anxiolytic in ICD-10 era -> benzodiazepine
+                cls = "benzodiazepine"
+            cod.append(str(rng.choice(table[cls])))
+            if rng.random() < 0.3:         # psychiatric comorbidity as secondary
+                cod2.append("F410" if icd10 else "30000")
+                desc2.append("Secondary")
+            else:
+                cod2.append("_")
+                desc2.append("DATO NON APPLICABILE")
+        else:
+            cod.append(str(rng.choice(NON_INTOX_ICD10 if icd10 else NON_INTOX_ICD9)))
+            cod2.append("_")
+            desc2.append("DATO NON APPLICABILE")
+
+    esito = rng.choice(list(ESITO_DISTRIBUTION), size=n_records,
+                       p=np.array(list(ESITO_DISTRIBUTION.values())))
     return pd.DataFrame({
         "Codice Fiscale Assistito MICROBIO": patient_ids,
-        "Annomese_INGR": year_months,
+        "Annomese_INGR": yms,
         "Eta(calcolata)": ages,
-        "Sesso (anag ass.to)": sex,
-        "Sesso (flusso)": sex,
-        "Cod Diagnosi": diagnoses,
+        "Sesso (anag ass.to)": sexes,
+        "Sesso (flusso)": sexes,
+        "Cod Diagnosi": cod,
         "Diagnosi": "Synthetic diagnosis",
-        "Cod Diagnosi Secondaria": secondary,
-        "Diagnosi Secondaria": np.where(secondary == "_", "DATO NON APPLICABILE", "Secondary"),
+        "Cod Diagnosi Secondaria": cod2,
+        "Diagnosi Secondaria": desc2,
         "Codice Esito": esito,
-        "Descrizione Esito": esito_desc,
+        "Descrizione Esito": [ESITO_DESCRIPTIONS[e] for e in esito],
         "Codice Nazione(flusso)": "100",
         "Conteggio Persone fisiche": 1,
-        "facility_id": facility,
-        "residence": residence,
+        "facility_id": rng.choice(FACILITIES, size=n_records),
+        "residence": rng.choice(COMUNI, size=n_records),
     })
 
 
-def generate_pharmaceutical_data(
+# =============================================================================
+# PHARMA (FUR) GENERATOR
+# =============================================================================
+
+def generate_pharma_data(
     n_records: int = 100000,
-    n_patients: int = 15000,
-    start_year: int = 2017,
-    end_year: int = 2025,
-    seed: int = 42,
+    seed: int = 43,
+    patient_ids: list[str] | None = None,
+    include_covid_effect: bool = True,
 ) -> pd.DataFrame:
     """
-    Generate synthetic pharmaceutical data (FAST version).
+    Generate synthetic pharmaceutical (FUR) dispensations with the real columns,
+    including the patient hash and a DDD column (name = DDD_COLUMN).
     """
-    np.random.seed(seed)
-    print(f"  Generating {n_records:,} pharma records...", end=" ", flush=True)
-    
-    # Patient IDs
-    patient_pool = generate_patient_ids(n_patients, seed + 100)
-    patient_ids = np.random.choice(patient_pool, n_records)
-    
-    # Dates
-    years = np.random.choice(range(start_year, end_year + 1), n_records)
-    months = np.random.randint(1, 13, n_records)
-    days = np.random.randint(1, 29, n_records)
-    dates = [f"{y}/{m:02d}/{d:02d} 00:00:00" for y, m, d in zip(years, months, days)]
-    
-    # Age and sex
-    ages = np.random.normal(55, 18, n_records).astype(int).clip(18, 95)
-    sex = np.random.choice(["F", "M"], n_records, p=[0.58, 0.42])
-    
-    # ATC codes (benzo increases over time)
-    benzo_prob = 0.25 + 0.20 * (years - start_year) / (end_year - start_year)
-    is_benzo = np.random.random(n_records) < benzo_prob
-    
-    atc_codes = np.where(
-        is_benzo,
-        np.random.choice(ATC_CODES_BENZO, n_records),
-        np.random.choice(ATC_CODES_OTHER, n_records)
-    )
-    
-    # Drug names
-    drug_name_map = {"N05BA12": "ALPRAZOLAM", "N05BA06": "LORAZEPAM", 
-                     "N05BA01": "DIAZEPAM", "N05BA04": "OXAZEPAM",
-                     "N05CF01": "ZOPICLONE", "N05CF02": "ZOLPIDEM",
-                     "N06AB06": "SERTRALINE", "N06AB10": "ESCITALOPRAM",
-                     "N02AX02": "TRAMADOL", "A02BC01": "OMEPRAZOLE"}
-    drug_names = np.array([drug_name_map.get(a, "OTHER") for a in atc_codes])
-    
-    # DDD
-    ddd = np.random.uniform(10, 60, n_records).round(2)
-    
-    # Prescriber
-    prescriber_code = np.random.choice(["1", "Y", "2"], n_records, p=[0.75, 0.20, 0.05])
-    prescriber_desc_map = {"1": "GENERICI", "Y": "DIPENDENTI", "2": "DATO MANCANTE"}
-    prescriber_desc = np.array([prescriber_desc_map[p] for p in prescriber_code])
-    
-    print("Done!")
-    
+    rng = np.random.default_rng(seed)
+
+    if patient_ids is None:
+        n_patients = max(1, n_records // 6)   # ~6 dispensations per patient on average
+        patient_ids = [generate_pseudonymised_id(f"{seed}-RX-{i}") for i in range(n_patients)]
+    # chronic users dispense more often: weight patient sampling by a heavy tail
+    weights = rng.gamma(shape=1.5, scale=1.0, size=len(patient_ids))
+    weights = weights / weights.sum()
+    assigned = rng.choice(patient_ids, size=n_records, p=weights)
+
+    atc_codes, atc_names, atc_w = zip(*ATC_DRUGS)
+    atc_w = np.array(atc_w) / sum(atc_w)
+    pick = rng.choice(len(ATC_DRUGS), size=n_records, p=atc_w)
+    cod_atc = [atc_codes[k] for k in pick]
+    desc_atc = [atc_names[k] for k in pick]
+
+    yms = _sampled_yearmonths(rng, n_records, trend=0.004, include_covid=include_covid_effect)
+    disp_dates, presc_dates = [], []
+    for ym in yms:
+        y, m = int(ym[:4]), int(ym[4:6])
+        d = date(y, m, int(rng.integers(1, 28)))
+        p = d - timedelta(days=int(rng.integers(0, 14)))
+        disp_dates.append(d.strftime("%Y/%m/%d 00:00:00"))
+        presc_dates.append(p.strftime("%Y/%m/%d 00:00:00"))
+
+    sex = rng.choice(["M", "F", "?"], size=n_records, p=[0.42, 0.50, 0.08])
+    ages = _sample_ages(rng, n_records).astype(object)
+    ages[rng.random(n_records) < 0.15] = ""        # age often blank in FUR
+
+    p_codes, p_descs, p_w = zip(*PRESCRIBER_TYPES)
+    pk = rng.choice(len(PRESCRIBER_TYPES), size=n_records, p=np.array(p_w) / sum(p_w))
+    ddd = np.round(rng.gamma(shape=2.0, scale=15.0, size=n_records), 2)  # plausible per-pack DDD
+
     return pd.DataFrame({
-        "Codice Fiscale Assistito MICROBIO": patient_ids,
+        "Codice Fiscale Assistito MICROBIO": assigned,
         "Eta Anni": ages,
         "Sesso": sex,
-        "Data Prescrizione.Data": dates,
-        "Data Erogazione.Data": dates,
-        "Cod Atc": atc_codes,
-        "Desc Atc": drug_names,
-        "Cod Tipo Medico": prescriber_code,
-        "Desc Tipo Medico": prescriber_desc,
-        "DDD": ddd,
+        "Data Prescrizione.Data": presc_dates,
+        "Data Erogazione.Data": disp_dates,
+        "Cod Atc": cod_atc,
+        "Desc Atc": desc_atc,
+        "Cod Tipo Medico": [p_codes[k] for k in pk],
+        "Desc Tipo Medico": [p_descs[k] for k in pk],
+        DDD_COLUMN: ddd,
     })
 
 
-def generate_fua_lookup() -> pd.DataFrame:
-    """Generate FUA lookup table."""
-    records = []
-    for comune in URBAN_COMUNI:
-        records.append({
-            "Comune": comune,
-            "Provincia": "Lombardia",
-            "City (City/Greater City) 2021": comune,
-            "FUA": f"FUA_{comune}",
-        })
-    for comune in RURAL_COMUNI:
-        records.append({
-            "Comune": comune,
-            "Provincia": "Lombardia",
-            "City (City/Greater City) 2021": "No City",
-            "FUA": "",
-        })
-    return pd.DataFrame(records)
-
+# =============================================================================
+# LINKED GENERATION (controlled patient overlap for Q5 linkage testing)
+# =============================================================================
 
 def generate_linked_data(
-    n_ed_records: int = 10000,
-    n_pharma_records: int = 50000,
+    n_ed_records: int = 50000,
+    n_pharma_records: int = 100000,
     linkage_rate: float = 0.6,
     seed: int = 42,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Generate ED and pharma data with patient overlap for linkage testing.
+    Generate ED and pharma data sharing patients, so a controllable fraction of
+    intoxication patients also have prescriptions (for Q5 linkage testing).
     """
-    np.random.seed(seed)
-    
-    # Generate shared patient pool
-    n_shared = int(min(n_ed_records, n_pharma_records) * 0.1)
-    shared_patients = generate_patient_ids(n_shared, seed + 200)
-    
-    # Generate base data
-    ed_df = generate_ed_presentations(n_ed_records, seed=seed)
-    pharma_df = generate_pharmaceutical_data(n_pharma_records, seed=seed + 1)
-    
-    # Add shared patients to both datasets
-    # Replace some intox patients with shared IDs
-    intox_mask = ed_df["Cod Diagnosi"].str.startswith(("T4", "96"))
-    n_replace = min(int(intox_mask.sum() * linkage_rate), len(shared_patients))
-    if n_replace > 0:
-        replace_idx = ed_df[intox_mask].sample(n=n_replace, random_state=seed).index
-        ed_df.loc[replace_idx, "Codice Fiscale Assistito MICROBIO"] = np.random.choice(
-            shared_patients, len(replace_idx)
-        )
-    
-    # Add shared patients to pharma
-    n_pharma_shared = min(len(shared_patients) * 5, 1000)
-    if n_pharma_shared > 0:
-        shared_pharma = pd.DataFrame({
-            "Codice Fiscale Assistito MICROBIO": np.random.choice(shared_patients, n_pharma_shared),
-            "Eta Anni": np.random.randint(25, 70, n_pharma_shared),
-            "Sesso": np.random.choice(["F", "M"], n_pharma_shared),
-            "Data Prescrizione.Data": "2023/06/15 00:00:00",
-            "Data Erogazione.Data": "2023/06/15 00:00:00",
-            "Cod Atc": np.random.choice(ATC_CODES_BENZO, n_pharma_shared),
-            "Desc Atc": "BENZODIAZEPINE",
-            "Cod Tipo Medico": "1",
-            "Desc Tipo Medico": "GENERICI",
-            "DDD": np.random.uniform(20, 50, n_pharma_shared).round(2),
-        })
-        pharma_df = pd.concat([pharma_df, shared_pharma], ignore_index=True)
-    
-    return ed_df, pharma_df
+    rng = np.random.default_rng(seed)
+    ed = generate_ed_data(n_records=n_ed_records, seed=seed)
+
+    intox_patients = ed.loc[ed["Cod Diagnosi"].isin(ALL_INTOX_CODES),
+                            "Codice Fiscale Assistito MICROBIO"].unique().tolist()
+    n_linked = int(len(intox_patients) * linkage_rate)
+    linked = list(rng.choice(intox_patients, size=n_linked, replace=False)) if n_linked else []
+    # pharma patient pool = linked intox patients + a set of fresh Rx-only patients
+    n_fresh = max(1, len(linked))
+    fresh = [generate_pseudonymised_id(f"{seed}-RXONLY-{i}") for i in range(n_fresh)]
+    pool = linked + fresh if (linked or fresh) else None
+
+    pharma = generate_pharma_data(n_records=n_pharma_records, seed=seed + 1, patient_ids=pool)
+    return ed, pharma
 
 
 def generate_all_synthetic_data(
-    output_dir: Optional[Path] = None,
+    output_dir=None,
     n_ed_records: int = 50000,
     n_pharma_records: int = 100000,
     seed: int = 42,
     save_files: bool = True,
-) -> Dict[str, pd.DataFrame]:
-    """
-    Generate all synthetic datasets.
-    """
-    print("=" * 60)
-    print("GENERATING SYNTHETIC DATA")
-    print("=" * 60)
-    
-    if output_dir is None:
-        output_dir = Path(".")
-    output_dir = Path(output_dir)
-    
-    print("\nGenerating ED and Pharmaceutical data...")
-    ed_df, pharma_df = generate_linked_data(
-        n_ed_records=n_ed_records,
-        n_pharma_records=n_pharma_records,
-        seed=seed,
-    )
-    
-    # Count overlap
-    ed_patients = set(ed_df["Codice Fiscale Assistito MICROBIO"].unique())
-    pharma_patients = set(pharma_df["Codice Fiscale Assistito MICROBIO"].unique())
-    overlap = len(ed_patients & pharma_patients)
-    print(f"  Patient overlap: {overlap:,} ({100*overlap/len(ed_patients):.1f}% of ED patients)")
-    
-    print("\nGenerating FUA lookup table...")
-    fua_df = generate_fua_lookup()
-    print(f"  Municipalities: {len(fua_df)} ({len(URBAN_COMUNI)} urban, {len(RURAL_COMUNI)} rural)")
-    
+) -> dict:
+    """Generate the full synthetic dataset and optionally save CSVs to <dir>/raw/."""
+    from pathlib import Path
+    ed, pharma = generate_linked_data(n_ed_records, n_pharma_records, seed=seed)
     if save_files:
-        raw_dir = output_dir / "raw"
-        lookups_dir = output_dir / "lookups"
-        raw_dir.mkdir(parents=True, exist_ok=True)
-        lookups_dir.mkdir(parents=True, exist_ok=True)
-        
-        ed_df.to_csv(raw_dir / "ed_presentations.csv", index=False)
-        print(f"\n✓ Saved: {raw_dir / 'ed_presentations.csv'}")
-        
-        pharma_df.to_csv(raw_dir / "pharma_synthetic.csv", index=False)
-        print(f"✓ Saved: {raw_dir / 'pharma_synthetic.csv'}")
-        
-        fua_df.to_csv(lookups_dir / "istat_fua_comuni.csv", index=False)
-        print(f"✓ Saved: {lookups_dir / 'istat_fua_comuni.csv'}")
-    
-    print("\n" + "=" * 60)
-    print("DONE!")
-    print("=" * 60)
-    
-    return {"ed": ed_df, "pharma": pharma_df, "fua": fua_df}
+        raw = Path(output_dir or ".") / "raw"
+        raw.mkdir(parents=True, exist_ok=True)
+        ed.to_csv(raw / "ed_presentations.csv", index=False)
+        pharma.to_csv(raw / "pharma_synthetic.csv", index=False)
+    return {"ed": ed, "pharma": pharma}
 
 
 if __name__ == "__main__":
-    data = generate_all_synthetic_data(save_files=False)
-    print(f"\nED shape: {data['ed'].shape}")
-    print(f"Pharma shape: {data['pharma'].shape}")
+    out = generate_all_synthetic_data(n_ed_records=5000, n_pharma_records=10000, save_files=False)
+    print("ED:", out["ed"].shape, "| Pharma:", out["pharma"].shape)
