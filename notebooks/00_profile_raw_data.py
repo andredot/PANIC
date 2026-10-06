@@ -23,7 +23,9 @@ string, so memory stays bounded on the ~1 GB extracts. Expect a few
 minutes per file.
 """
 
+import csv
 import sys
+import traceback
 from pathlib import Path
 
 project_root = Path(__file__).parent.parent
@@ -137,7 +139,9 @@ def sniff(path: Path) -> dict:
             encoding = "latin-1"
     first = raw.split(b"\n", 1)[0].decode(encoding, errors="replace").lstrip("﻿").rstrip("\r")
     sep = max([";", ",", "\t", "|"], key=first.count)
-    return {"encoding": encoding, "sep": sep, "header": first.split(sep)}
+    # Parse the header like pandas does, so quoted names ("Annomese_INGR") match
+    header = next(csv.reader([first], delimiter=sep))
+    return {"encoding": encoding, "sep": sep, "header": [h.strip() for h in header]}
 
 
 def read_chunks(path: Path, info: dict):
@@ -192,7 +196,7 @@ def report_missing(tally: Tally, rows: int, cols) -> None:
 # ED PROFILE
 # =============================================================================
 
-def profile_ed(path: Path) -> None:
+def profile_ed(path: Path, mental_codes: set[str]) -> None:
     section(f"ED DATA: {path.name}")
     info = describe_file(path)
     cols = info["header"]
@@ -204,6 +208,9 @@ def profile_ed(path: Path) -> None:
     esito_d = find_col(cols, "descrizione esito")
     pid = find_col(cols, "microbio")
     out(f"\n  detected: year_month={ym!r} diagnoses={dx_cols} esito={esito!r} patient={pid!r}")
+    if not pid:
+        out("  !! WARNING: no patient identifier column - patient-level linkage (Q5) "
+            "and repeat-presentation counts are NOT possible from this file.")
 
     t, rows, patients = Tally(), 0, DistinctCounter()
     for chunk in read_chunks(path, info):
@@ -224,14 +231,19 @@ def profile_ed(path: Path) -> None:
             code = chunk[dx].str.replace(r"[.\s]", "", regex=True).str.upper()
             t10 = code.str.match(r"T(3[6-9]|4\d|50)")
             i9 = code.str.match(r"9(6\d|7\d)")
+            ecode = code.str.match(r"E(85[0-8]|950|962|980)")
             flags = pd.DataFrame({
                 "rows": 1,
                 "missing": is_missing(chunk[dx]),
-                "icd10_like": code.str.match(r"[A-Z]\d\d"),
-                "icd9_like": code.str.match(r"(\d{3}|V\d\d|E\d{3})"),
+                # numeric = ICD-9-CM; letter (not E/V) = ICD-10; E/V exist in both
+                "icd9_numeric": code.str.match(r"\d{3}"),
+                "icd10_letter": code.str.match(r"[A-DF-UW-Z]\d\d"),
+                "E_or_V": code.str.match(r"[EV]\d"),
                 "T36_T50": t10,
                 "960_979": i9,
                 "F_codes": code.str.match(r"F\d"),
+                "mental_list": code.isin(mental_codes),
+                "E_drug": ecode,
             }).astype(int)
             t.add(f"{dx}|by_year", flags.groupby(year.rename("year")).sum())
 
@@ -240,7 +252,10 @@ def profile_ed(path: Path) -> None:
             t.add(f"{dx}|t_shape", shape_of(tc).value_counts())
             t.add(f"{dx}|t_sub", tc.str[:4].rename("subcategory").value_counts())
             t.add(f"{dx}|intent", tc[tc.str.len() >= 6].str[5].rename("intent").value_counts())
-            t.add(f"{dx}|i9_sub", code[i9].str[:4].rename("prefix").value_counts())
+            t.add(f"{dx}|i9_sub", code[i9].rename("code").value_counts())
+            t.add(f"{dx}|i9_len", code[i9].str.len().rename("length").value_counts())
+            t.add(f"{dx}|ecode", code[ecode].str[:4].rename("ecode").value_counts())
+            t.add(f"{dx}|mental3", code[code.isin(mental_codes)].str[:3].rename("category").value_counts())
 
     report_missing(t, rows, cols)
     if pid:
@@ -267,8 +282,15 @@ def profile_ed(path: Path) -> None:
         show(t.get(f"{dx}|t_sub"), n=80)
         out("\n  Intent character (6th char of 7-char ICD-10-CM T-codes; 1-6):")
         show(t.get(f"{dx}|intent").sort_index(), sort=False)
-        out("\n  960-979 codes (if any) by 4-char prefix:")
-        show(t.get(f"{dx}|i9_sub"))
+        out("\n  960-979 codes (if any), full code (dots removed):")
+        show(t.get(f"{dx}|i9_sub"), n=80)
+        out("\n  Length of 960-979 codes (5 = 5th-digit detail, e.g. 97081 cocaine):")
+        show(t.get(f"{dx}|i9_len").sort_index(), sort=False)
+        out("\n  ICD-9 drug-poisoning E-codes (intent: E850-858 accidental, E950 self-harm, "
+            "E962 assault, E980 undetermined):")
+        show(t.get(f"{dx}|ecode"))
+        out("\n  Codes from cod_sindromi_mental.txt, by 3-digit category:")
+        show(t.get(f"{dx}|mental3"), n=60)
 
 
 # =============================================================================
@@ -339,19 +361,32 @@ if __name__ == "__main__":
     for f in sorted(DATA_DIR.iterdir()):
         out(f"  {f.name:<30} {f.stat().st_size / 1e6:>10,.1f} MB")
 
+    mental_codes: set[str] = set()
     if MENTAL_CODES_FILE.exists():
         section(f"LOOKUP: {MENTAL_CODES_FILE.name}")
-        text = MENTAL_CODES_FILE.read_bytes().decode("utf-8", errors="replace").splitlines()
-        out(f"  {len(text)} lines; first 40:")
-        for line in text[:40]:
-            out(f"    {line}")
+        text = MENTAL_CODES_FILE.read_bytes().decode("utf-8", errors="replace")
+        tokens = [c.strip().replace(".", "").upper()
+                  for c in text.replace("\n", ";").split(";") if c.strip()]
+        mental_codes = set(tokens)
+        out(f"  {len(tokens)} codes listed, {len(mental_codes)} unique "
+            f"({len(tokens) - len(mental_codes)} duplicates)")
+        by_cat: dict[str, list[str]] = {}
+        for c in sorted(mental_codes):
+            by_cat.setdefault(c[:3], []).append(c)
+        out("  unique codes by 3-character category:")
+        for cat, codes in by_cat.items():
+            out(f"    {cat}: {', '.join(codes)}")
 
-    for f in ED_FILES:
-        if f.exists():
-            profile_ed(f)
-
-    for f in FUR_FILES:
-        profile_fur(f)
+    jobs = [(profile_ed, f, mental_codes) for f in ED_FILES if f.exists()]
+    jobs += [(profile_fur, f) for f in FUR_FILES]
+    for func, *args in jobs:
+        try:
+            func(*args)
+        except Exception:
+            # Keep going: one bad file should not lose the whole (long) run
+            out(f"\n  !! ERROR profiling {args[0].name}:")
+            out(traceback.format_exc())
+        OUT_FILE.write_text("\n".join(_lines), encoding="utf-8")   # save progress
 
     OUT_FILE.write_text("\n".join(_lines), encoding="utf-8")
     print(f"\nSaved profile to: {OUT_FILE}")
