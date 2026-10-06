@@ -12,6 +12,7 @@ data/processed/
 # Outputs
 outputs/figures/
 outputs/tables/
+outputs/profile/
 *.png
 *.pdf
 
