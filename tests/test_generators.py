@@ -95,8 +95,8 @@ def test_non_intox_codes_not_flagged(ed):
 
 def test_esito_values_valid(ed):
     assert set(ed["Codice Esito"].unique()) <= set(gen.ESITO_DISTRIBUTION)
-    # admission-eligible dispositions (2,4,5) should occur in a sample this size
-    assert ed["Codice Esito"].isin({"2", "4", "5"}).any()
+    # admission dispositions (2 ward, 3 transfer) should occur in a sample this size
+    assert ed["Codice Esito"].isin({"2", "3"}).any()
 
 
 # ---------------------------------------------------------------------------

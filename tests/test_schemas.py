@@ -245,9 +245,13 @@ def test_classify_empty_code_does_not_crash():
 # ---------------------------------------------------------------------------
 
 def test_transfer_counts_as_admission():
-    assert "5" in ADMISSION_ESITO_CODES            # transfer
-    assert ADMISSION_ESITO_CODES == {"2", "3", "4", "5"}
+    # Codebook confirmed from the real extract: 2 = ward, 3 = transfer
+    assert "3" in ADMISSION_ESITO_CODES            # transfer
+    assert ADMISSION_ESITO_CODES == {"2", "3"}
     assert "1" not in ADMISSION_ESITO_CODES         # discharged home
+    assert "4" not in ADMISSION_ESITO_CODES         # died in ED
+    assert "5" not in ADMISSION_ESITO_CODES         # refused admission
+    assert "0" not in ADMISSION_ESITO_CODES         # OBI observation
 
 
 # ---------------------------------------------------------------------------

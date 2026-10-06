@@ -38,32 +38,29 @@ class Sex(str, Enum):
 class EsitoED(str, Enum):
     """
     ED disposition codes (Codice Esito).
-    
-    These codes indicate the patient's status at the end of the ED encounter.
-    CONFIRMED from VDI:
-        "1" = "DIMISSIONE A DOMICILIO" (discharged home)
-    
-    Values below are provisional based on standard Italian ED data flows;
-    verify against actual codebook in the VDI environment.
+
+    CONFIRMED from the full PS2017_2025.csv extract (code x description
+    profile, Oct 2026). "?" (DATO MANCANTE) also occurs and is treated as
+    missing.
     """
-    DIMISSIONE_DOMICILIO = "1"       # CONFIRMED: Discharged home
-    RICOVERO_ORDINARIO = "2"         # Admitted to ordinary ward (provisional)
-    RICOVERO_DH = "3"                # Admitted to day hospital (provisional)
-    RICOVERO_TERAPIA_INTENSIVA = "4" # Admitted to ICU (provisional)
-    TRASFERIMENTO = "5"              # Transferred to another facility (provisional)
-    DECESSO = "6"                    # Died in ED (provisional)
-    RIFIUTO_RICOVERO = "7"           # Refused admission/left AMA (provisional)
-    ABBANDONO = "8"                  # Left without being seen (provisional)
-    # TODO: Verify codes 2-8 against actual VDI codebook
+    OBI = "0"                        # TRATTAMENTO IN OSSERVAZIONE BREVE INTENSIVA (OBI)
+    DIMISSIONE_DOMICILIO = "1"       # DIMISSIONE A DOMICILIO
+    RICOVERO_REPARTO = "2"           # RICOVERO IN REPARTO DEGENZA
+    TRASFERIMENTO = "3"              # TRASFERIMENTO AD ALTRO ISTITUTO
+    DECEDUTO_PS = "4"                # DECEDUTO IN PS
+    RIFIUTA_RICOVERO = "5"           # RIFIUTA IL RICOVERO
+    ABBANDONO_PRIMA_VISITA = "6"     # IL PAZIENTE ABBANDONA IL PS PRIMA DELLA VISITA MEDICA
+    ABBANDONO_IN_CORSO = "7"         # ... ABBANDONA IL PS IN CORSO DI ACCERTAMENTI ...
+    DIMISSIONE_AMBULATORIALE = "8"   # DIMISSIONE A STRUTTURE AMBULATORIALI
+    GIUNTO_CADAVERE = "9"            # GIUNTO CADAVERE
 
 
 # Esito codes that indicate hospital admission (for SDO linkage).
-# Transfers (code 5) are counted as admissions: a transfer out of the ED
-# typically ends in admission at the receiving facility.
+# Transfers (code 3) are counted as admissions: a transfer out of the ED
+# typically ends in admission at the receiving facility. Refused admission
+# (5), OBI (0) and deaths in ED (4) are NOT admissions.
 ADMISSION_ESITO_CODES = {
-    EsitoED.RICOVERO_ORDINARIO.value,
-    EsitoED.RICOVERO_DH.value,
-    EsitoED.RICOVERO_TERAPIA_INTENSIVA.value,
+    EsitoED.RICOVERO_REPARTO.value,
     EsitoED.TRASFERIMENTO.value,
 }
 

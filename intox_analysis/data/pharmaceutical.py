@@ -286,7 +286,7 @@ DDD_SOURCE_COLUMN = "DDD"
 # Values that mean "missing" in the FUR extract, nulled at scan time so that
 # e.g. blank ages parse as null integers and "?" sexes become null rather than
 # a spurious category.
-FUR_NULL_VALUES = ["", " ", "?", " -", "-", "NON APPLICABILE", "DATO MANCANTE"]
+FUR_NULL_VALUES = ["", " ", "?", "#", " -", "-", "NON APPLICABILE", "DATO MANCANTE", "DATO ERRATO"]
 
 
 # =============================================================================

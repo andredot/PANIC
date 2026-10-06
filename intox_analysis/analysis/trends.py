@@ -431,7 +431,7 @@ def process_ed_data(
     diagnosis_col_secondary: str = "diagnosis_code_secondary",
     date_col: str = "year_month",
     esito_col: str = "disposition_code",
-    admission_codes: List[str] = ["2", "3", "4"],
+    admission_codes: List[str] = ["2", "3"],  # ward, transfer (schemas.ADMISSION_ESITO_CODES)
 ) -> pd.DataFrame:
     """
     Process ED data to add drug class and mental health classifications.

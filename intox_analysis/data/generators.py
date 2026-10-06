@@ -92,12 +92,18 @@ ALL_INTOX_CODES = {c for codes in ICD10_CODES_BY_CLASS.values() for c in codes} 
 NON_INTOX_ICD10 = ["J189", "R104", "N390", "I10", "S0100", "F410", "F320", "F200", "R51"]
 NON_INTOX_ICD9 = ["4659", "7890", "7840", "4019", "78900"]
 
-# Esito: only 1 and 2 are confirmed from real data; 4/5/6 weights are placeholders.
-ESITO_DISTRIBUTION = {"1": 0.70, "2": 0.16, "4": 0.03, "5": 0.08, "6": 0.03}
+# Esito codebook and approximate shares, confirmed from the real ED extract.
+ESITO_DISTRIBUTION = {"1": 0.757, "2": 0.181, "3": 0.031, "5": 0.015, "7": 0.007,
+                      "0": 0.004, "8": 0.003, "4": 0.001, "6": 0.001}
 ESITO_DESCRIPTIONS = {
-    "1": "DIMISSIONE A DOMICILIO", "2": "RICOVERO ORDINARIO",
-    "4": "RICOVERO IN TERAPIA INTENSIVA", "5": "TRASFERIMENTO AD ALTRO ISTITUTO",
-    "6": "DECEDUTO IN PRONTO SOCCORSO",
+    "0": "TRATTAMENTO IN OSSERVAZIONE BREVE INTESIVA (OBI)",
+    "1": "DIMISSIONE A DOMICILIO", "2": "RICOVERO IN REPARTO DEGENZA",
+    "3": "TRASFERIMENTO AD ALTRO ISTITUTO", "4": "DECEDUTO IN PS",
+    "5": "RIFIUTA IL RICOVERO",
+    "6": "IL PAZIENTE ABBANDONA IL PS PRIMA DELLA VISITA MEDICA",
+    "7": "IL PAZIENTE ABBANDONA IL PS IN CORSO DI ACCERTAMENTI E/O PRIMA DELLA "
+         "CHIUSURA DELLA CARTELLA CLINICA",
+    "8": "DIMISSIONE A STRUTTURE AMBULATORIALI",
 }
 
 FACILITIES = ["OSP_MI_HUMANITAS", "OSP_PV_SAN_MATTEO", "OSP_CO_SANT_ANNA",
@@ -218,8 +224,8 @@ def generate_ed_data(
             cod2.append("_")
             desc2.append("DATO NON APPLICABILE")
 
-    esito = rng.choice(list(ESITO_DISTRIBUTION), size=n_records,
-                       p=np.array(list(ESITO_DISTRIBUTION.values())))
+    esito_p = np.array(list(ESITO_DISTRIBUTION.values()))
+    esito = rng.choice(list(ESITO_DISTRIBUTION), size=n_records, p=esito_p / esito_p.sum())
     return pd.DataFrame({
         "Codice Fiscale Assistito MICROBIO": patient_ids,
         "Annomese_INGR": yms,

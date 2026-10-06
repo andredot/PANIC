@@ -56,7 +56,7 @@ COL_CONFIG = {
 }
 
 # Esito codes that indicate hospital admission
-ADMISSION_CODES = ["2", "3", "4"]
+ADMISSION_CODES = ["2", "3"]  # ward, transfer (confirmed codebook)
 
 # Number of recent years for trend analysis
 LAST_N_YEARS = 3  # 2023, 2024, 2025
