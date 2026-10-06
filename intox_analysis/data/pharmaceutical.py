@@ -267,7 +267,6 @@ PHARMA_COLUMN_MAPPING = {
     "Desc Atc": "drug_name",
     "Cod Tipo Medico": "prescriber_type_code",
     "Desc Tipo Medico": "prescriber_type_desc",
-    "DDD": "ddd",  # Defined Daily Dose - NEW in updated extract
 }
 
 # Prescriber types (from VDI observations)
@@ -277,6 +276,17 @@ PRESCRIBER_TYPES = {
     "Y": "Hospital",        # DIPENDENTI = Hospital/employed physicians (provisional)
     # TODO: Verify complete codebook in VDI
 }
+
+# Name of the DDD column in the real FUR extract.
+# TODO: set this to the actual VDI header once confirmed. The synthetic
+# generator emits it as "DDD". If the column is absent, loading still works
+# (no `ddd` column is produced) so the placeholder never breaks a load.
+DDD_SOURCE_COLUMN = "DDD"
+
+# Values that mean "missing" in the FUR extract, nulled at scan time so that
+# e.g. blank ages parse as null integers and "?" sexes become null rather than
+# a spurious category.
+FUR_NULL_VALUES = ["", " ", "?", " -", "-", "NON APPLICABILE", "DATO MANCANTE"]
 
 
 # =============================================================================
@@ -335,13 +345,13 @@ def scan_pharmaceutical_data(
     # Create lazy scans for each file
     lazy_frames = []
     for path in file_paths:
-        # Use scan_csv for lazy loading (memory efficient)
+        # Use scan_csv for lazy loading (memory efficient). FUR missing markers
+        # are treated as null so blank ages / "?" sexes don't derail the schema.
         lf = pl.scan_csv(
             path,
-            # Infer schema from first 10000 rows for speed
             infer_schema_length=10000,
-            # Don't load everything at once
             low_memory=True,
+            null_values=FUR_NULL_VALUES,
         )
         lazy_frames.append(lf)
     
@@ -351,13 +361,18 @@ def scan_pharmaceutical_data(
     else:
         lf = pl.concat(lazy_frames)
     
-    # Standardise column names if requested
+    # Full rename map = known columns + the (configurable) DDD column.
+    rename_map = {**PHARMA_COLUMN_MAPPING, DDD_SOURCE_COLUMN: "ddd"}
+    
+    # Standardise column names if requested. Only rename columns that are
+    # actually present, so a reduced extract (or an as-yet-unconfirmed DDD
+    # column name) never raises.
     if standardise_columns:
-        # Build rename mapping for columns that exist
-        lf = lf.rename({
-            old: new 
-            for old, new in PHARMA_COLUMN_MAPPING.items()
-        })
+        present = set(lf.collect_schema().names())
+        lf = lf.rename({old: new for old, new in rename_map.items() if old in present})
+        # Ensure DDD is numeric when present
+        if "ddd" in lf.collect_schema().names():
+            lf = lf.with_columns(pl.col("ddd").cast(pl.Float64, strict=False))
     
     # Parse dates if requested
     if parse_dates:
@@ -365,10 +380,12 @@ def scan_pharmaceutical_data(
         date_cols = ["prescription_date", "dispensing_date"] if standardise_columns else [
             "Data Prescrizione.Data", "Data Erogazione.Data"
         ]
+        available = set(lf.collect_schema().names())
         for col in date_cols:
-            lf = lf.with_columns(
-                pl.col(col).str.to_datetime(format=date_format, strict=False)
-            )
+            if col in available:
+                lf = lf.with_columns(
+                    pl.col(col).str.to_datetime(format=date_format, strict=False)
+                )
     
     return lf
 
